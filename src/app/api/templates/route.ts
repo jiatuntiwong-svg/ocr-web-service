@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 
-export const runtime = "edge";
 
 // แม่แบบมาตรฐาน (Global Templates)
 const GLOBAL_TEMPLATES = [

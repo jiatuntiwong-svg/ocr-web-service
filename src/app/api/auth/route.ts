@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { DEV_USERS } from "@/lib/devUsers";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 
-export const runtime = "edge";
 
 type UserPayload = { id: string; name: string; email: string; role: string; plan: string; ts: number };
 

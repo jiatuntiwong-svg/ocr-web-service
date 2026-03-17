@@ -3,7 +3,6 @@ import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { generateWithAI } from "@/lib/ai-handler";
 import { RETENTION_LIMITS } from "@/lib/devUsers";
 
-export const runtime = "edge";
 
 export async function POST(request: NextRequest) {
   try {

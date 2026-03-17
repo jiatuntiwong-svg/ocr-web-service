@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { DEV_USERS, PLAN_LIMITS } from "@/lib/devUsers";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 
-export const runtime = "edge";
 
 // ── Verify caller is admin by reading their session cookie ──────────────────
 function getSessionUser(req: NextRequest): { id?: string; role?: string } | null {

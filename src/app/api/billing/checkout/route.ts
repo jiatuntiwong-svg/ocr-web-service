@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import Stripe from "stripe";
 
-export const runtime = "edge";
 
 export async function POST(request: NextRequest) {
     try {

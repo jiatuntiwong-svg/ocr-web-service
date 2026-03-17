@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { PLAN_LIMITS } from "@/lib/devUsers";
 
-export const runtime = "edge";
 
 const getPlanLimit = (plan?: string) => PLAN_LIMITS[plan?.toLowerCase() ?? ""] ?? 50;
 
