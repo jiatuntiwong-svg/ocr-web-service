@@ -4,33 +4,34 @@
   "main": ".open-next/worker.js",
   "compatibility_date": "2026-02-24",
   "compatibility_flags": [
-    "nodejs_compat"
+    "nodejs_compat",
+    "nodejs_compat_populate_process_env"
   ],
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "ocr-db",
-      "database_id": "83267dbd-b240-46a1-bd41-b6f91aacdd87",
-    },
+      "database_id": "83267dbd-b240-46a1-bd41-b6f91aacdd87"
+    }
   ],
   "r2_buckets": [
     {
       "binding": "BUCKET",
-      "bucket_name": "ocr-images",
-    },
+      "bucket_name": "ocr-images"
+    }
   ],
   "assets": {
     "binding": "ASSETS",
-    "directory": ".open-next/assets",
+    "directory": ".open-next/assets"
   },
   "observability": {
-    "enabled": true,
+    "enabled": true
   },
   "services": [
     {
       "binding": "WORKER_SELF_REFERENCE",
-      "service": "ocr-web-service",
-    },
+      "service": "ocr-web-service"
+    }
   ],
   "queues": {
     "producers": [
