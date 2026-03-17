@@ -510,11 +510,7 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
                             <span className="text-[10px] font-bold text-slate-400">{extractFields.length} fields active</span>
                             {extractFields.length > 0 && (
                                 <button
-                                    onClick={() => {
-                                        if (confirm("Are you sure you want to clear all fields?")) {
-                                            setExtractFields([]);
-                                        }
-                                    }}
+                                    onClick={() => setExtractFields([])}
                                     className="text-[10px] font-bold text-rose-500 hover:text-rose-600 bg-rose-50 dark:bg-rose-900/10 px-2 py-1 rounded-md transition-colors"
                                 >
                                     Clear All
