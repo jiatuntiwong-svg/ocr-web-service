@@ -15,7 +15,7 @@
 	},
 	"dependencies": {
 		"@google/generative-ai": "^0.24.1",
-		"@opennextjs/cloudflare": "^1.15.1",
+		"@opennextjs/cloudflare": "^1.17.1",
 		"next": "^16.1.7",
 		"pdf-lib": "^1.17.1",
 		"react": "19.0.0",
