@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { DEV_USERS } from "@/lib/devUsers";
+import { getCloudflareContext } from "@opennextjs/cloudflare";
 
 export const runtime = "edge";
 
@@ -24,8 +25,7 @@ function parseToken(token: string): UserPayload | null {
 // ─── Try to get Cloudflare D1 (only works under wrangler dev / production) ───
 async function queryUserFromDB(email: string, password?: string) {
     try {
-        const mod = await import("@opennextjs/cloudflare");
-        const { env } = await mod.getCloudflareContext();
+        const { env } = await getCloudflareContext();
         if (!env?.DB) throw new Error("no DB binding");
 
         const query = password

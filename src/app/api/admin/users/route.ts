@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { DEV_USERS, PLAN_LIMITS } from "@/lib/devUsers";
+import { getCloudflareContext } from "@opennextjs/cloudflare";
 
 export const runtime = "edge";
 
@@ -18,8 +19,7 @@ function getSessionUser(req: NextRequest): { id?: string; role?: string } | null
 // ── Try to get CF D1 env (returns null in next dev / if not bound) ───────────
 async function getCFEnv() {
     try {
-        const mod = await import("@opennextjs/cloudflare");
-        const { env } = await mod.getCloudflareContext();
+        const { env } = await getCloudflareContext();
         return env?.DB ? env : null;
     } catch {
         return null; // next dev has no CF context
