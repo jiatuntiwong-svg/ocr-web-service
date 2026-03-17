@@ -497,7 +497,21 @@ export default function OCRWorkspace({ user, onDocumentProcessed }: Props) {
                             <svg className="w-4 h-4 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" /></svg>
                             <span className="text-[11px] font-black uppercase tracking-widest text-slate-500">Extraction Fields</span>
                         </div>
-                        <span className="text-[10px] font-bold text-slate-400">{extractFields.length} fields active</span>
+                        <div className="flex items-center gap-3">
+                            <span className="text-[10px] font-bold text-slate-400">{extractFields.length} fields active</span>
+                            {extractFields.length > 0 && (
+                                <button
+                                    onClick={() => {
+                                        if (confirm("Are you sure you want to clear all fields?")) {
+                                            setExtractFields([]);
+                                        }
+                                    }}
+                                    className="text-[10px] font-bold text-rose-500 hover:text-rose-600 bg-rose-50 dark:bg-rose-900/10 px-2 py-1 rounded-md transition-colors"
+                                >
+                                    Clear All
+                                </button>
+                            )}
+                        </div>
                     </div>
 
                     <div className="p-5 space-y-4">
