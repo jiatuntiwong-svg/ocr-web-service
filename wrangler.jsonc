@@ -33,20 +33,6 @@
       "service": "ocr-web-service"
     }
   ],
-  "queues": {
-    "producers": [
-      {
-        "binding": "OCR_QUEUE",
-        "queue": "ocr-jobs"
-      }
-    ],
-    "consumers": [
-      {
-        "queue": "ocr-jobs",
-        "max_concurrency": 5
-      }
-    ]
-  },
   "ai": {
     "binding": "AI"
   }
