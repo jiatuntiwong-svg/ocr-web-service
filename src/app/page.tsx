@@ -142,7 +142,7 @@ export default function Home() {
         </div>
 
         {activeView === 'ocr' ? (
-          <OCRWorkspace user={user} onDocumentProcessed={fetchStats} />
+          <OCRWorkspace user={user} onDocumentProcessed={fetchStats} onNavigateToBilling={() => setActiveView('billing')} />
         ) : activeView === 'dashboard' ? (
           <DashboardView usageStats={usageStats} userName={user?.name} userPlan={user?.plan} />
         ) : activeView === 'settings' ? (

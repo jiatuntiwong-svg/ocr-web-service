@@ -36,7 +36,7 @@ export async function POST(req: NextRequest) {
         // Create new user record
         const id = crypto.randomUUID();
         await env.DB
-            .prepare("INSERT INTO users (id, name, email, password, role, plan) VALUES (?, ?, ?, ?, 'user', 'Free')")
+            .prepare("INSERT INTO users (id, name, email, password, role, plan, credits_total, credits_remaining) VALUES (?, ?, ?, ?, 'user', 'Free', 50, 50)")
             .bind(id, name, email, password)
             .run();
 

@@ -12,6 +12,7 @@ interface OCRResult { [key: string]: any; }
 interface Props {
     user: User | null;
     onDocumentProcessed?: () => void;
+    onNavigateToBilling?: () => void;
 }
 
 // ─── Field type badge ─────────────────────────────────────────────────────────
@@ -36,7 +37,7 @@ const TYPE_ICONS: Record<string, React.ReactNode> = {
 };
 
 // ─── Component ────────────────────────────────────────────────────────────────
-export default function OCRWorkspace({ user, onDocumentProcessed }: Props) {
+export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBilling }: Props) {
     // File & Preview
     const [file, setFile] = useState<File | null>(null);
     const [previews, setPreviews] = useState<string[]>([]);
@@ -234,6 +235,14 @@ export default function OCRWorkspace({ user, onDocumentProcessed }: Props) {
         try {
             setProgress(30);
             const res = await fetch("/api/upload", { method: "POST", body: formData });
+            
+            if (res.status === 403) {
+                if (onNavigateToBilling) {
+                    onNavigateToBilling();
+                    return;
+                }
+            }
+
             const data = await res.json() as { success: boolean; documentId?: string; error?: string };
 
             if (!data.success || !data.documentId) {
