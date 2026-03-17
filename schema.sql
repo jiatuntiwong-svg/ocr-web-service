@@ -1,11 +1,13 @@
-﻿-- ตารางเก็บข้อมูลผู้ใช้
+-- ตารางเก็บข้อมูลผู้ใช้
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   email TEXT UNIQUE,
   name TEXT,
+  password TEXT,
+  role TEXT DEFAULT 'user',
   avatar_url TEXT,
   stripe_customer_id TEXT,
-  plan TEXT DEFAULT 'Free', -- 'Free', 'Pro', 'Enterprise'
+  plan TEXT DEFAULT 'free', -- 'free', 'starter', 'pro', 'enterprise', 'system'
   subscription_id TEXT,
   subscription_status TEXT,
   credits_total INTEGER DEFAULT 10, -- Base credits for the plan
