@@ -1,0 +1,33 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="logo_grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0094FF;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#001A72;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  
+  <!-- Stylized 'D' / Document Shape -->
+  <path d="M300 250 L700 250 C850 250 900 400 900 550 C900 700 850 850 700 850 L300 850 Z" fill="url(#logo_grad)" />
+  
+  <!-- Counter-shape / Inner part -->
+  <path d="M400 350 L700 350 C800 350 820 450 820 550 C820 650 800 750 700 750 L400 750 Z" fill="white" />
+  
+  <!-- Document Lines -->
+  <rect x="450" y="420" width="300" height="25" rx="10" fill="url(#logo_grad)" />
+  <rect x="450" y="480" width="350" height="25" rx="10" fill="url(#logo_grad)" />
+  <rect x="450" y="540" width="320" height="25" rx="10" fill="url(#logo_grad)" />
+  <rect x="450" y="600" width="380" height="25" rx="10" fill="url(#logo_grad)" />
+  <rect x="450" y="660" width="280" height="25" rx="10" fill="url(#logo_grad)" />
+
+  <!-- Motion Lines (The Spikes on the left) -->
+  <path d="M250 450 L100 512 L250 500 Z" fill="url(#logo_grad)" />
+  <path d="M250 550 L120 580 L250 560 Z" fill="url(#logo_grad)" />
+  <path d="M250 650 L150 650 L250 630 Z" fill="url(#logo_grad)" />
+  <rect x="230" y="430" width="100" height="20" rx="10" fill="url(#logo_grad)" />
+  <rect x="210" y="510" width="120" height="20" rx="10" fill="url(#logo_grad)" />
+  <rect x="180" y="590" width="150" height="20" rx="10" fill="url(#logo_grad)" />
+  
+  <!-- Corner Fold (Top-Left of D) -->
+  <path d="M300 250 L450 250 L300 400 Z" fill="#0057FF" opacity="0.8" />
+  <path d="M450 250 L450 400 L300 400 Z" fill="#0029FF" />
+</svg>

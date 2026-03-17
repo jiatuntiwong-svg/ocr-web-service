@@ -1,0 +1,41 @@
+{
+	"name": "ocr-web-service",
+	"version": "0.1.0",
+	"private": true,
+	"scripts": {
+		"dev": "next dev",
+		"dev:cf": "opennextjs-cloudflare build && wrangler dev",
+		"build": "next build",
+		"start": "next start",
+		"lint": "next lint",
+		"deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
+		"upload": "opennextjs-cloudflare build && opennextjs-cloudflare upload",
+		"preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
+		"cf-typegen": "wrangler types --env-interface CloudflareEnv ./cloudflare-env.d.ts"
+	},
+	"dependencies": {
+		"@google/generative-ai": "^0.24.1",
+		"@opennextjs/cloudflare": "^1.15.1",
+		"next": "15.1.7",
+		"pdf-lib": "^1.17.1",
+		"react": "19.0.0",
+		"react-dom": "19.0.0",
+		"stripe": "^20.4.1",
+		"xlsx": "^0.18.5"
+	},
+	"devDependencies": {
+		"@cloudflare/next-on-pages": "^1.13.16",
+		"@eslint/eslintrc": "^3",
+		"@tailwindcss/postcss": "^4.0.0",
+		"@types/node": "^20.17.0",
+		"@types/react": "^19.0.0",
+		"@types/react-dom": "^19.0.0",
+		"autoprefixer": "^10.4.20",
+		"eslint": "^9.0.0",
+		"eslint-config-next": "15.1.7",
+		"postcss": "^8.5.6",
+		"tailwindcss": "^4.2.1",
+		"typescript": "^5.7.4",
+		"wrangler": "^4.68.0"
+	}
+}
