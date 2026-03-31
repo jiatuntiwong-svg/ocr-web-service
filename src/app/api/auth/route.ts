@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { DEV_USERS } from "@/lib/devUsers";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { logSystemEvent } from "@/lib/logger";
 
 
 type UserPayload = { id: string; name: string; email: string; role: string; plan: string; ts: number };
@@ -74,8 +75,19 @@ export async function POST(req: NextRequest) {
         }
 
         if (!foundUser) {
+            // Log failed login attempt
+            try {
+                const { env } = await getCloudflareContext();
+                if (env) await logSystemEvent(env, "LOGIN_FAILED", `Failed login attempt for: ${email}`, "warning");
+            } catch {}
             return NextResponse.json({ error: "Invalid email or password" }, { status: 401 });
         }
+
+        // Log successful login
+        try {
+            const { env } = await getCloudflareContext();
+            if (env) await logSystemEvent(env, "LOGIN_SUCCESS", `User logged in: ${foundUser.email}`, "info", foundUser.id);
+        } catch {}
 
         const token = makeToken(foundUser);
         const response = NextResponse.json({ success: true, user: foundUser });
@@ -121,7 +133,18 @@ export async function GET(req: NextRequest) {
 }
 
 // ─── DELETE /api/auth  → Logout ──────────────────────────────────────────────
-export async function DELETE() {
+export async function DELETE(req: NextRequest) {
+    // Log logout
+    try {
+        const cookie = req.cookies.get("session");
+        if (cookie?.value) {
+            const payload = parseToken(cookie.value);
+            if (payload) {
+                const { env } = await getCloudflareContext();
+                if (env) await logSystemEvent(env, "LOGOUT", `User logged out: ${payload.email}`, "info", payload.id);
+            }
+        }
+    } catch {}
     const response = NextResponse.json({ success: true });
     response.cookies.delete("session");
     return response;

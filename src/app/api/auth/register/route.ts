@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { logSystemEvent } from "@/lib/logger";
 
 export async function POST(req: NextRequest) {
     try {
@@ -39,6 +40,8 @@ export async function POST(req: NextRequest) {
             .prepare("INSERT INTO users (id, name, email, password, role, plan, credits_total, credits_remaining) VALUES (?, ?, ?, ?, 'user', 'Free', 50, 50)")
             .bind(id, name, email, password)
             .run();
+
+        await logSystemEvent(env, "USER_REGISTERED", `New user registered: ${email} (${name})`, "info", id);
 
         return NextResponse.json({ success: true });
     } catch (err: any) {
