@@ -4,22 +4,24 @@ export interface AIProviderRequest {
     provider: string;
     model: string;
     prompt: string;
-    image: { data: string; mimeType: string };
+    image?: { data: string; mimeType: string };
+    images?: { data: string; mimeType: string }[];
     apiKeys: string[];
 }
 
 export async function generateWithAI(req: AIProviderRequest): Promise<string> {
-    const { provider, model, prompt, image, apiKeys } = req;
+    const { provider, model, prompt, image, images, apiKeys } = req;
     let lastError = null;
+    const finalImages = images || (image ? [image] : []);
 
     for (const key of apiKeys) {
         try {
             if (provider === 'gemini') {
-                return await generateGemini(key, model, prompt, image);
+                return await generateGemini(key, model, prompt, finalImages);
             } else if (provider === 'openai') {
-                return await generateOpenAI(key, model, prompt, image);
+                return await generateOpenAI(key, model, prompt, finalImages);
             } else if (provider === 'openrouter') {
-                return await generateOpenRouter(key, model, prompt, image);
+                return await generateOpenRouter(key, model, prompt, finalImages);
             }
         } catch (error: any) {
             console.warn(`Key failed for ${provider}/${model}:`, error.message);
@@ -32,18 +34,24 @@ export async function generateWithAI(req: AIProviderRequest): Promise<string> {
     throw new Error(`All keys failed for ${provider}. Last error: ${lastError?.message}`);
 }
 
-async function generateGemini(key: string, modelName: string, prompt: string, image: { data: string; mimeType: string }) {
+async function generateGemini(key: string, modelName: string, prompt: string, images: { data: string; mimeType: string }[]) {
     const genAI = new GoogleGenerativeAI(key);
     const model = genAI.getGenerativeModel({ model: modelName });
+    const imageParts = images.map(img => ({ inlineData: img }));
     const result = await model.generateContent([
         prompt,
-        { inlineData: image },
+        ...imageParts,
     ]);
     const response = await result.response;
     return response.text();
 }
 
-async function generateOpenAI(key: string, modelName: string, prompt: string, image: { data: string; mimeType: string }) {
+async function generateOpenAI(key: string, modelName: string, prompt: string, images: { data: string; mimeType: string }[]) {
+    const contentPayload: any[] = [{ type: "text", text: prompt }];
+    images.forEach(img => {
+        contentPayload.push({ type: "image_url", image_url: { url: `data:${img.mimeType};base64,${img.data}` } });
+    });
+
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -55,10 +63,7 @@ async function generateOpenAI(key: string, modelName: string, prompt: string, im
             messages: [
                 {
                     role: "user",
-                    content: [
-                        { type: "text", text: prompt },
-                        { type: "image_url", image_url: { url: `data:${image.mimeType};base64,${image.data}` } }
-                    ]
+                    content: contentPayload
                 }
             ],
             response_format: { type: "json_object" }
@@ -69,7 +74,12 @@ async function generateOpenAI(key: string, modelName: string, prompt: string, im
     return data.choices[0].message.content;
 }
 
-async function generateOpenRouter(key: string, modelName: string, prompt: string, image: { data: string; mimeType: string }) {
+async function generateOpenRouter(key: string, modelName: string, prompt: string, images: { data: string; mimeType: string }[]) {
+    const contentPayload: any[] = [{ type: "text", text: prompt }];
+    images.forEach(img => {
+        contentPayload.push({ type: "image_url", image_url: { url: `data:${img.mimeType};base64,${img.data}` } });
+    });
+
     const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -83,10 +93,7 @@ async function generateOpenRouter(key: string, modelName: string, prompt: string
             messages: [
                 {
                     role: "user",
-                    content: [
-                        { type: "text", text: prompt },
-                        { type: "image_url", image_url: { url: `data:${image.mimeType};base64,${image.data}` } }
-                    ]
+                    content: contentPayload
                 }
             ]
         })

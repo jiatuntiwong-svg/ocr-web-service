@@ -2,6 +2,7 @@
 import React, { useEffect } from "react";
 import DashboardView from "@/components/DashboardView";
 import OCRWorkspace from "@/components/OCRWorkspace";
+import CompareWorkspace from "@/components/CompareWorkspace";
 import AdminUsersView from "@/components/AdminUsersView";
 import BillingView from "@/components/BillingView";
 import APISettingsView from "@/components/APISettingsView";
@@ -15,7 +16,7 @@ export default function Home() {
   const { usageStats, fetchStats } = useStats(user);
 
   // ─── Local State ─────────────────────────────────────────────
-  const [activeView, setActiveView] = useState<'ocr' | 'dashboard' | 'settings' | 'billing' | 'admin_users'>('ocr');
+  const [activeView, setActiveView] = useState<'ocr' | 'compare' | 'dashboard' | 'settings' | 'billing' | 'admin_users'>('ocr');
   const [result, setResult] = useState<Record<string, any> | null>(null);
 
   // Fetch stats on user ready
@@ -55,6 +56,13 @@ export default function Home() {
             title="OCR Workspace"
           >
             <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+          </button>
+          <button
+            onClick={() => setActiveView('compare')}
+            className={`p-4 rounded-2xl transition-all group ${activeView === 'compare' ? 'bg-amber-50 text-amber-600 dark:bg-amber-900/20' : 'text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'}`}
+            title="Compare Documents"
+          >
+            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" /></svg>
           </button>
           <button
             onClick={() => setActiveView('dashboard')}
@@ -114,6 +122,7 @@ export default function Home() {
           <div className="space-y-1">
             <h1 className="text-4xl font-black tracking-tight bg-gradient-to-br from-slate-900 to-slate-500 dark:from-white dark:to-slate-400 bg-clip-text text-transparent">
               {activeView === 'ocr' ? 'DOCRoom.AI'
+                : activeView === 'compare' ? 'Compare Documents'
                 : activeView === 'dashboard' ? 'Insight Hub'
                   : activeView === 'settings' ? 'API Settings'
                     : activeView === 'admin_users' ? 'User Management'
@@ -143,6 +152,8 @@ export default function Home() {
 
         {activeView === 'ocr' ? (
           <OCRWorkspace user={user} onDocumentProcessed={fetchStats} onNavigateToBilling={() => setActiveView('billing')} />
+        ) : activeView === 'compare' ? (
+          <CompareWorkspace user={user} />
         ) : activeView === 'dashboard' ? (
           <DashboardView usageStats={usageStats} userName={user?.name} userPlan={user?.plan} />
         ) : activeView === 'settings' ? (
