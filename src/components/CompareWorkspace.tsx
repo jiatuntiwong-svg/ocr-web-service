@@ -170,9 +170,9 @@ export default function CompareWorkspace({ user }: Props) {
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
                 
                 {/* ── Documents Grid ── */}
-                <div className={`col-span-1 lg:col-span-${result ? '8' : '12'} grid grid-cols-1 md:grid-cols-${files.length} gap-4`}>
+                <div className={`col-span-1 ${result ? 'xl:col-span-9 lg:col-span-8' : 'lg:col-span-12'} grid grid-cols-1 ${files.length === 3 ? 'md:grid-cols-3' : 'md:grid-cols-2'} gap-4`}>
                     {files.map((file, idx) => (
-                        <div key={idx} className="bg-white/80 dark:bg-slate-900/80 backdrop-blur-md rounded-3xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col h-[70vh]">
+                        <div key={idx} className="bg-white/80 dark:bg-slate-900/80 backdrop-blur-md rounded-3xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col h-[82vh]">
                             {/* Header */}
                             <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between bg-slate-50/50 dark:bg-slate-900/50">
                                 <span className="text-xs font-black uppercase text-slate-500 tracking-widest">Document #{idx + 1}</span>
@@ -190,7 +190,7 @@ export default function CompareWorkspace({ user }: Props) {
                             </div>
                             
                             {/* Preview Area */}
-                            <div className="flex-1 relative bg-slate-100 dark:bg-slate-900/50 flex items-center justify-center p-2 overflow-auto custom-scrollbar group">
+                            <div className="flex-1 relative bg-slate-100 dark:bg-slate-900/50 flex p-4 overflow-auto custom-scrollbar group items-start justify-center">
                                 {!file ? (
                                     <label className="flex flex-col items-center justify-center cursor-pointer opacity-40 hover:opacity-100 transition-opacity p-10 h-full w-full">
                                         <div className="h-16 w-16 bg-white dark:bg-slate-800 rounded-full shadow-sm flex items-center justify-center mb-4 border border-dashed border-slate-300">
@@ -200,8 +200,8 @@ export default function CompareWorkspace({ user }: Props) {
                                         <input type="file" className="hidden" accept="image/*" onChange={(e) => handleFileInput(idx, e)} />
                                     </label>
                                 ) : (
-                                    <div className="relative inline-block shadow-lg mx-auto">
-                                        {previews[idx] && <img src={previews[idx] as string} alt={`Doc ${idx+1}`} className="max-w-full h-auto object-contain pointer-events-none rounded-sm border border-slate-200 dark:border-slate-800" />}
+                                    <div className="relative inline-block shadow-sm mx-auto w-full">
+                                        {previews[idx] && <img src={previews[idx] as string} alt={`Doc ${idx+1}`} className="w-full h-auto pointer-events-none rounded-sm border border-slate-200 dark:border-slate-800" />}
                                         
                                         {/* Overlay Highlights */}
                                         {result && result.map((diff, diffIdx) => {
@@ -217,7 +217,7 @@ export default function CompareWorkspace({ user }: Props) {
 
                 {/* ── Results Panel ── */}
                 {result && (
-                    <div className="col-span-1 lg:col-span-4 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md rounded-3xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col h-[70vh]">
+                    <div className="col-span-1 xl:col-span-3 lg:col-span-4 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md rounded-3xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col h-[82vh]">
                         <div className="px-5 py-4 border-b border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/50">
                             <h3 className="text-sm font-black flex items-center gap-2 text-slate-800 dark:text-white">
                                 <div className="h-6 w-6 rounded-md bg-blue-100 flex items-center justify-center text-blue-600">
