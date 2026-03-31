@@ -5,9 +5,19 @@ import Stripe from "stripe";
 
 export async function POST(request: NextRequest) {
     try {
-        const { env } = await getCloudflareContext();
-        const stripe = new Stripe(env.STRIPE_SECRET_KEY as string, {
-            apiVersion: "2026-02-25.clover" as any,
+        let env: any = process.env;
+        try {
+            const ctx = await getCloudflareContext();
+            if (ctx && ctx.env) {
+                env = { ...process.env, ...ctx.env };
+            }
+        } catch (e) {
+            console.log("Using process.env fallback");
+        }
+
+        const stripeKey = (env.STRIPE_SECRET_KEY || process.env.STRIPE_SECRET_KEY || "").toString().trim();
+        const stripe = new Stripe(stripeKey, {
+            apiVersion: "2023-10-16" as any,
         });
 
         const { userId, plan, type, credits } = await request.json() as {
@@ -34,12 +44,16 @@ export async function POST(request: NextRequest) {
         if (type === "subscription") {
             // Define your Stripe Price IDs here
             let priceId = "";
-            if (plan === "starter") priceId = env.STRIPE_PRICE_STARTER;
-            else if (plan === "pro") priceId = env.STRIPE_PRICE_PRO;
-            else priceId = env.STRIPE_PRICE_ENTERPRISE;
+            const starterId = env.STRIPE_PRICE_STARTER || process.env.STRIPE_PRICE_STARTER;
+            const proId = env.STRIPE_PRICE_PRO || process.env.STRIPE_PRICE_PRO;
+            const enterpriseId = env.STRIPE_PRICE_ENTERPRISE || process.env.STRIPE_PRICE_ENTERPRISE;
+
+            if (plan === "starter") priceId = starterId;
+            else if (plan === "pro") priceId = proId;
+            else priceId = enterpriseId;
 
             sessionParams.line_items?.push({
-                price: priceId as string,
+                price: priceId?.toString().trim(),
                 quantity: 1,
             });
         } else {
