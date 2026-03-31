@@ -46,6 +46,17 @@ export async function GET(request: NextRequest) {
         priceMap.pro = findPrice(proId as string) || "$19";
         priceMap.enterprise = findPrice(enterpriseId as string) || "$99";
 
+        // ADD DEBUG INFO
+        priceMap._debug = {
+            hasStripeKey: !!stripeKey,
+            stripeKeyPrefix: stripeKey ? stripeKey.substring(0, 7) : null,
+            envStarterId: starterId,
+            envProId: proId,
+            envEnterpriseId: enterpriseId,
+            totalPricesFetched: prices.data.length,
+            availablePriceIds: prices.data.map(p => p.id),
+        };
+
         return NextResponse.json(priceMap);
     } catch (error: any) {
         console.error("Error fetching Stripe prices:", error);
