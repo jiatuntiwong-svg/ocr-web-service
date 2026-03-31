@@ -4,6 +4,7 @@ import DashboardView from "@/components/DashboardView";
 import OCRWorkspace from "@/components/OCRWorkspace";
 import CompareWorkspace from "@/components/CompareWorkspace";
 import AdminUsersView from "@/components/AdminUsersView";
+import AdminLogsView from "@/components/AdminLogsView";
 import BillingView from "@/components/BillingView";
 import APISettingsView from "@/components/APISettingsView";
 import { useAuth } from "@/lib/hooks/useAuth";
@@ -16,7 +17,7 @@ export default function Home() {
   const { usageStats, fetchStats } = useStats(user);
 
   // ─── Local State ─────────────────────────────────────────────
-  const [activeView, setActiveView] = useState<'ocr' | 'compare' | 'dashboard' | 'settings' | 'billing' | 'admin_users'>('ocr');
+  const [activeView, setActiveView] = useState<'ocr' | 'compare' | 'dashboard' | 'settings' | 'billing' | 'admin_users' | 'admin_logs'>('ocr');
   const [result, setResult] = useState<Record<string, any> | null>(null);
 
   // Fetch stats on user ready
@@ -90,14 +91,23 @@ export default function Home() {
 
           {/* Admin-only: User Management */}
           {user?.role === 'admin' && (
-            <button
-              onClick={() => setActiveView('admin_users')}
-              className={`p-4 rounded-2xl transition-all group relative ${activeView === 'admin_users' ? 'bg-amber-50 text-amber-600 dark:bg-amber-900/20' : 'text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'}`}
-              title="Admin: User Management"
-            >
-              <div className="absolute -top-1 -right-1 h-2.5 w-2.5 bg-amber-500 rounded-full shadow-sm shadow-amber-500/50" />
-              <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" /></svg>
-            </button>
+            <>
+              <button
+                onClick={() => setActiveView('admin_users')}
+                className={`p-4 rounded-2xl transition-all group relative ${activeView === 'admin_users' ? 'bg-amber-50 text-amber-600 dark:bg-amber-900/20' : 'text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'}`}
+                title="Admin: User Management"
+              >
+                <div className="absolute -top-1 -right-1 h-2.5 w-2.5 bg-amber-500 rounded-full shadow-sm shadow-amber-500/50" />
+                <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" /></svg>
+              </button>
+              <button
+                onClick={() => setActiveView('admin_logs')}
+                className={`p-4 rounded-2xl transition-all group relative ${activeView === 'admin_logs' ? 'bg-rose-50 text-rose-600 dark:bg-rose-900/20' : 'text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'}`}
+                title="Admin: System Logs"
+              >
+                <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+              </button>
+            </>
           )}
         </div>
 
@@ -126,7 +136,8 @@ export default function Home() {
                 : activeView === 'dashboard' ? 'Insight Hub'
                   : activeView === 'settings' ? 'API Settings'
                     : activeView === 'admin_users' ? 'User Management'
-                      : 'Premium Plans'}
+                      : activeView === 'admin_logs' ? 'System Logs'
+                        : 'Premium Plans'}
             </h1>
             <p className="text-slate-500 dark:text-slate-400 font-medium text-sm italic">
               Empowering your workflow with Intelligent OCR
@@ -160,6 +171,8 @@ export default function Home() {
           <APISettingsView />
         ) : activeView === 'admin_users' ? (
           <AdminUsersView />
+        ) : activeView === 'admin_logs' ? (
+          <AdminLogsView userId={user?.id || ""} />
         ) : (
           <BillingView userPlan={user?.plan || "Free"} userId={user?.id || ""} />
         )}

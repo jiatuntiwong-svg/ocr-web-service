@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { logSystemEvent } from "@/lib/logger";
 import { generateWithAI } from "@/lib/ai-handler";
 
 export async function POST(req: NextRequest) {
+    let userId = "guest";
     try {
         const formData = await req.formData();
-        const userId = (formData.get("userId") as string) || "guest";
+        userId = (formData.get("userId") as string) || "guest";
         const selectedModelId = (formData.get("selectedModelId") as string) || "";
         
         const files: File[] = [];
@@ -126,6 +128,8 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ error: "AI returned invalid format", raw: text }, { status: 502 });
         }
 
+        await logSystemEvent(env, "DOCUMENT_COMPARE", `Compared ${files.length} documents.`, "info", userId);
+
         return NextResponse.json({
             success: true,
             processing_time_ms: processingTimeMs,
@@ -134,6 +138,10 @@ export async function POST(req: NextRequest) {
 
     } catch (error: any) {
         console.error("[Compare POST] error:", error);
+        const { env } = await getCloudflareContext();
+        if (env) {
+            await logSystemEvent(env, "COMPARE_ERROR", error.message, "error", userId);
+        }
         return NextResponse.json({ error: error.message || "Internal server error" }, { status: 500 });
     }
 }

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { generateWithAI } from "@/lib/ai-handler";
+import { logSystemEvent } from "@/lib/logger";
 import { RETENTION_LIMITS } from "@/lib/devUsers";
 
 
@@ -49,6 +50,8 @@ export async function POST(request: NextRequest) {
     // ─── 1. Storage & Database ──────────────────────────────────────────────────
     const arrayBuffer = await file.arrayBuffer();
     await env.BUCKET.put(fileName, arrayBuffer);
+    await logSystemEvent(env, "DOCUMENT_UPLOAD", `Uploaded file: ${file.name} (${file.type})`, "info", userId);
+    
     await env.DB.prepare("INSERT INTO documents (id, user_id, file_name, storage_path, status) VALUES (?, ?, ?, ?, ?)")
       .bind(docId, userId, file.name, fileName, "processing")
       .run();
@@ -118,6 +121,7 @@ export async function POST(request: NextRequest) {
           .bind("completed", JSON.stringify(extracted), processingTimeMs, docId).run();
 
         await env.BUCKET.delete(fileName);
+        await logSystemEvent(env, "OCR_SUCCESS", `Doc ${docId} processed successfully in ${processingTimeMs}ms`, "info", userId);
 
         // Retention
         const retentionLimit = RETENTION_LIMITS[userPlan.toLowerCase()] ?? 50;
@@ -126,6 +130,7 @@ export async function POST(request: NextRequest) {
 
       } catch (ocrError: any) {
         console.error("OCR Error:", ocrError);
+        await logSystemEvent(env, "OCR_EXTRACTION_ERROR", ocrError.message, "error", userId);
         await env.DB.prepare("UPDATE documents SET status = ?, raw_json = ? WHERE id = ?")
           .bind("error", JSON.stringify({ error: ocrError.message }), docId).run();
         await env.BUCKET.delete(fileName).catch(() => { });
