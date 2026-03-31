@@ -6,9 +6,9 @@ interface Props {
     user: User | null;
 }
 
-interface CompareLine {
+interface CompareField {
+    key: string;
     is_diff: boolean;
-    text?: string;
     doc1?: string | null;
     doc2?: string | null;
     doc3?: string | null;
@@ -16,7 +16,7 @@ interface CompareLine {
 
 interface CompareResult {
     summary: string[];
-    lines: CompareLine[];
+    fields: CompareField[];
 }
 
 export default function CompareWorkspace({ user }: Props) {
@@ -29,6 +29,7 @@ export default function CompareWorkspace({ user }: Props) {
     const [loading, setLoading] = useState(false);
     const [result, setResult] = useState<CompareResult | null>(null);
     const [error, setError] = useState<string | null>(null);
+    const [compareFields, setCompareFields] = useState<string>("ประเภทเอกสาร, เลขที่เอกสาร, วันที่, ชื่อผู้ออก, ชื่อผู้รับ, เลขผู้เสียภาษี, เงื่อนไขชำระเงิน, กำหนดส่งสินค้า, ยอดรวม, ภาษี, ยอดสุทธิ, รายการสินค้า");
 
     // Fetch AI Models on mount
     useEffect(() => {
@@ -88,6 +89,7 @@ export default function CompareWorkspace({ user }: Props) {
         const formData = new FormData();
         if (user) formData.append("userId", user.id);
         if (targetModelId) formData.append("selectedModelId", targetModelId);
+        if (compareFields) formData.append("fields", compareFields);
         validFiles.forEach((file, idx) => {
             formData.append(`file${idx + 1}`, file);
         });
@@ -99,10 +101,10 @@ export default function CompareWorkspace({ user }: Props) {
             if (!res.ok || !data.success) {
                 throw new Error(data.error || "Comparison failed");
             }
-            if (data.extracted_data && Array.isArray(data.extracted_data.lines)) {
+            if (data.extracted_data && Array.isArray(data.extracted_data.fields)) {
                 setResult(data.extracted_data);
             } else {
-                setResult({ summary: [], lines: [] }); // no diffs found
+                setResult({ summary: [], fields: [] }); // no diffs found
             }
         } catch (err: any) {
             setError(err.message || "An error occurred during comparison.");
@@ -124,7 +126,17 @@ export default function CompareWorkspace({ user }: Props) {
                         <svg className="w-6 h-6 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
                         Document Comparison
                     </h2>
-                    <p className="text-sm text-slate-500 mt-1 font-medium">Upload Documents (Image or PDF) to find differences line-by-line automatically using AI.</p>
+                    <p className="text-sm text-slate-500 mt-1 font-medium">Upload Documents (Image or PDF) to find differences via Field Extraction automatically using AI.</p>
+                </div>
+                
+                <div className="flex-1 max-w-xl mx-4">
+                    <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest px-1 block mb-1">Fields to Compare</label>
+                    <input 
+                        value={compareFields}
+                        onChange={(e) => setCompareFields(e.target.value)}
+                        placeholder="e.g. ชื่อบริษัท, วันที่, ยอดรวม"
+                        className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-2.5 text-xs text-slate-700 dark:text-slate-300 font-medium placeholder-slate-400 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+                    />
                 </div>
                 
                 <div className="flex items-center gap-4">
@@ -223,34 +235,36 @@ export default function CompareWorkspace({ user }: Props) {
                                 </div>
                             )}
 
-                           {(!result.lines || result.lines.length === 0) ? (
+                           {(!result.fields || result.fields.length === 0) ? (
                                <div className="text-center py-10 opacity-50 font-sans">
                                    <svg className="w-10 h-10 mx-auto text-slate-400 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 13l4 4L19 7" /></svg>
                                    <p className="text-sm font-bold">Documents are identical!</p>
-                                   <p className="text-xs">No differences found.</p>
+                                   <p className="text-xs">No differences found based on the provided fields.</p>
                                </div>
                            ) : (
-                               result.lines.map((line, i) => (
-                                   line.is_diff ? (
-                                       <div key={i} className="flex flex-col gap-1.5 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 shadow-sm transition-all hover:border-blue-300 mt-4 mb-4">
-                                           <div className="flex items-start gap-3">
+                               result.fields.map((field, i) => (
+                                   field.is_diff ? (
+                                       <div key={i} className="flex flex-col gap-1.5 p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 shadow-sm transition-all hover:border-blue-300 mt-4 mb-4">
+                                           <div className="text-xs font-black uppercase tracking-wider text-blue-600 dark:text-blue-400 mb-1 border-b border-slate-200 dark:border-slate-700 pb-2">{field.key}</div>
+                                           <div className="flex items-start gap-3 mt-1">
                                                 <span className="shrink-0 w-12 text-[10px] font-black tracking-wider uppercase text-rose-500 bg-rose-100 dark:bg-rose-900/50 px-2 py-1 rounded text-center">Doc 1</span>
-                                                <span className="text-rose-700 dark:text-rose-300 break-words pt-0.5">{line.doc1 || <em className="opacity-40 line-through">(ไม่มีข้อมูล)</em>}</span>
+                                                <span className="text-rose-700 dark:text-rose-300 break-words pt-0.5 whitespace-pre-line">{field.doc1 || <em className="opacity-40 line-through">(ไม่มีข้อมูล)</em>}</span>
                                            </div>
-                                           <div className="flex items-start gap-3">
+                                           <div className="flex items-start gap-3 mt-1 border-t border-slate-100 dark:border-slate-700/50 pt-2">
                                                 <span className="shrink-0 w-12 text-[10px] font-black tracking-wider uppercase text-emerald-600 bg-emerald-100 dark:bg-emerald-900/50 px-2 py-1 rounded text-center">Doc 2</span>
-                                                <span className="text-emerald-700 dark:text-emerald-300 break-words font-medium pt-0.5">{line.doc2 || <em className="opacity-40 line-through">(ไม่มีข้อมูล)</em>}</span>
+                                                <span className="text-emerald-700 dark:text-emerald-300 break-words font-medium pt-0.5 whitespace-pre-line">{field.doc2 || <em className="opacity-40 line-through">(ไม่มีข้อมูล)</em>}</span>
                                            </div>
                                            {files.length === 3 && (
-                                               <div className="flex items-start gap-3 mt-1 pt-1 border-t border-slate-200 dark:border-slate-700">
+                                               <div className="flex items-start gap-3 mt-1 pt-2 border-t border-slate-100 dark:border-slate-700/50">
                                                     <span className="shrink-0 w-12 text-[10px] font-black tracking-wider uppercase text-amber-600 bg-amber-100 dark:bg-amber-900/50 px-2 py-1 rounded text-center">Doc 3</span>
-                                                    <span className="text-amber-700 dark:text-amber-300 break-words pt-0.5">{line.doc3 || <em className="opacity-40 line-through">(ไม่มีข้อมูล)</em>}</span>
+                                                    <span className="text-amber-700 dark:text-amber-300 break-words pt-0.5 whitespace-pre-line">{field.doc3 || <em className="opacity-40 line-through">(ไม่มีข้อมูล)</em>}</span>
                                                </div>
                                            )}
                                        </div>
                                    ) : (
-                                       <div key={i} className="px-2 py-0.5 text-slate-500 dark:text-slate-400 opacity-60 hover:opacity-100 transition-opacity">
-                                            {line.text}
+                                       <div key={i} className="px-3 py-2 flex items-start justify-between gap-4 text-slate-500 dark:text-slate-400 opacity-70 hover:opacity-100 transition-opacity bg-slate-50/50 dark:bg-slate-800/20 rounded-xl mb-1 border border-transparent hover:border-slate-200 dark:hover:border-slate-700">
+                                            <span className="font-bold text-xs shrink-0 pt-0.5">{field.key}</span>
+                                            <span className="text-xs truncate break-all max-w-[60%] text-right">{field.doc1}</span>
                                        </div>
                                    )
                                ))
