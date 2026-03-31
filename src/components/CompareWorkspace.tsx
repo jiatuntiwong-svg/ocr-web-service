@@ -6,11 +6,17 @@ interface Props {
     user: User | null;
 }
 
-interface Difference {
-    description: string;
-    bbox1?: number[] | null;
-    bbox2?: number[] | null;
-    bbox3?: number[] | null;
+interface CompareLine {
+    is_diff: boolean;
+    text?: string;
+    doc1?: string | null;
+    doc2?: string | null;
+    doc3?: string | null;
+}
+
+interface CompareResult {
+    summary: string[];
+    lines: CompareLine[];
 }
 
 export default function CompareWorkspace({ user }: Props) {
@@ -21,9 +27,8 @@ export default function CompareWorkspace({ user }: Props) {
     const [aiModels, setAiModels] = useState<any[]>([]);
 
     const [loading, setLoading] = useState(false);
-    const [result, setResult] = useState<Difference[] | null>(null);
+    const [result, setResult] = useState<CompareResult | null>(null);
     const [error, setError] = useState<string | null>(null);
-    const [activeDiffIndex, setActiveDiffIndex] = useState<number | null>(null);
 
     // Fetch AI Models on mount
     useEffect(() => {
@@ -79,7 +84,6 @@ export default function CompareWorkspace({ user }: Props) {
         setLoading(true);
         setError(null);
         setResult(null);
-        setActiveDiffIndex(null);
 
         const formData = new FormData();
         if (user) formData.append("userId", user.id);
@@ -95,10 +99,10 @@ export default function CompareWorkspace({ user }: Props) {
             if (!res.ok || !data.success) {
                 throw new Error(data.error || "Comparison failed");
             }
-            if (data.extracted_data && Array.isArray(data.extracted_data.differences)) {
-                setResult(data.extracted_data.differences);
+            if (data.extracted_data && Array.isArray(data.extracted_data.lines)) {
+                setResult(data.extracted_data);
             } else {
-                setResult([]); // no diffs found
+                setResult({ summary: [], lines: [] }); // no diffs found
             }
         } catch (err: any) {
             setError(err.message || "An error occurred during comparison.");
@@ -107,26 +111,7 @@ export default function CompareWorkspace({ user }: Props) {
         }
     };
 
-    const renderBox = (bbox: number[] | null | undefined, index: number) => {
-        if (!bbox || bbox.length !== 4) return null;
-        // Bbox format assumes [ymin, xmin, ymax, xmax] normalized 0-1000
-        const [ymin, xmin, ymax, xmax] = bbox;
-        const top = `${(ymin / 1000) * 100}%`;
-        const left = `${(xmin / 1000) * 100}%`;
-        const width = `${((xmax - xmin) / 1000) * 100}%`;
-        const height = `${((ymax - ymin) / 1000) * 100}%`;
-        
-        const isActive = activeDiffIndex === index;
-        return (
-            <div
-                key={`box-${index}`}
-                style={{ top, left, width, height }}
-                className={`absolute transition-all duration-300 cursor-pointer rounded-[2px] ${isActive ? 'border-4 border-rose-500 bg-rose-500/30 z-20 shadow-[0_0_20px_rgba(244,63,94,0.5)] scale-105' : 'border-2 border-rose-400 border-dashed bg-rose-400/10 z-10 hover:border-solid hover:bg-rose-500/20'}`}
-                onMouseEnter={() => setActiveDiffIndex(index)}
-                onMouseLeave={() => setActiveDiffIndex(null)}
-            />
-        );
-    };
+    // renderBox removed as we do text diffing now
 
     const validFilesCount = files.filter(f => f !== null).length;
 
@@ -139,7 +124,7 @@ export default function CompareWorkspace({ user }: Props) {
                         <svg className="w-6 h-6 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
                         Document Comparison
                     </h2>
-                    <p className="text-sm text-slate-500 mt-1 font-medium">Upload 2 or 3 Images to find differences automatically with AI highlighting.</p>
+                    <p className="text-sm text-slate-500 mt-1 font-medium">Upload Documents (Image or PDF) to find differences line-by-line automatically using AI.</p>
                 </div>
                 
                 <div className="flex items-center gap-4">
@@ -179,7 +164,7 @@ export default function CompareWorkspace({ user }: Props) {
                                 <div className="flex gap-2">
                                     <label className="text-[10px] font-bold text-blue-600 cursor-pointer hover:bg-blue-50 px-2 py-1 rounded-md transition-all">
                                         {file ? 'Replace' : 'Browse'}
-                                        <input type="file" className="hidden" accept="image/*" onChange={(e) => handleFileInput(idx, e)} />
+                                        <input type="file" className="hidden" accept="image/*,application/pdf" onChange={(e) => handleFileInput(idx, e)} />
                                     </label>
                                     {idx > 1 && (
                                         <button onClick={() => removeFileSlot(idx)} className="text-[10px] font-bold text-rose-500 hover:bg-rose-50 px-2 py-1 rounded-md transition-all">
@@ -197,17 +182,15 @@ export default function CompareWorkspace({ user }: Props) {
                                             <svg className="w-8 h-8 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 4v16m8-8H4" /></svg>
                                         </div>
                                         <span className="text-xs font-bold text-slate-500">Upload Image {idx + 1}</span>
-                                        <input type="file" className="hidden" accept="image/*" onChange={(e) => handleFileInput(idx, e)} />
+                                        <input type="file" className="hidden" accept="image/*,application/pdf" onChange={(e) => handleFileInput(idx, e)} />
                                     </label>
                                 ) : (
-                                    <div className="relative inline-block shadow-sm mx-auto w-full">
-                                        {previews[idx] && <img src={previews[idx] as string} alt={`Doc ${idx+1}`} className="w-full h-auto pointer-events-none rounded-sm border border-slate-200 dark:border-slate-800" />}
-                                        
-                                        {/* Overlay Highlights */}
-                                        {result && result.map((diff, diffIdx) => {
-                                            const bbox = idx === 0 ? diff.bbox1 : idx === 1 ? diff.bbox2 : diff.bbox3;
-                                            return renderBox(bbox, diffIdx);
-                                        })}
+                                    <div className="relative shadow-sm mx-auto w-full h-full min-h-[50vh]">
+                                        {files[idx]?.type === 'application/pdf' ? (
+                                             <iframe src={`${previews[idx]}#toolbar=0&navpanes=0`} className="w-full h-full min-h-[60vh] rounded-sm border border-slate-200 dark:border-slate-800" />
+                                        ) : (
+                                             <img src={previews[idx] as string} alt={`Doc ${idx+1}`} className="w-full h-auto pointer-events-none rounded-sm border border-slate-200 dark:border-slate-800" />
+                                        )}
                                     </div>
                                 )}
                             </div>
@@ -223,41 +206,53 @@ export default function CompareWorkspace({ user }: Props) {
                                 <div className="h-6 w-6 rounded-md bg-blue-100 flex items-center justify-center text-blue-600">
                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" /></svg>
                                 </div>
-                                {result.length} Differences Found
+                                {result.summary?.length > 0 && ` (${result.summary.length} จุดหลักที่พบ)`}
                             </h3>
                         </div>
                         
-                        <div className="flex-1 p-3 overflow-y-auto space-y-2 custom-scrollbar">
-                           {result.length === 0 ? (
-                               <div className="text-center py-10 opacity-50">
+                        <div className="flex-1 p-4 overflow-y-auto space-y-2 custom-scrollbar font-mono text-sm leading-relaxed">
+                            {result.summary && result.summary.length > 0 && (
+                                <div className="mb-6 p-4 bg-blue-50/50 dark:bg-blue-900/10 rounded-xl border border-blue-100 dark:border-blue-800/50">
+                                    <h4 className="font-bold text-blue-800 dark:text-blue-300 mb-2 flex items-center gap-2">
+                                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                                        สรุปภาพรวม
+                                    </h4>
+                                    <ul className="list-disc pl-5 space-y-1 text-slate-700 dark:text-slate-300 font-sans text-xs sm:text-sm">
+                                        {result.summary.map((s, i) => <li key={i}>{s}</li>)}
+                                    </ul>
+                                </div>
+                            )}
+
+                           {(!result.lines || result.lines.length === 0) ? (
+                               <div className="text-center py-10 opacity-50 font-sans">
                                    <svg className="w-10 h-10 mx-auto text-slate-400 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 13l4 4L19 7" /></svg>
                                    <p className="text-sm font-bold">Documents are identical!</p>
                                    <p className="text-xs">No differences found.</p>
                                </div>
                            ) : (
-                               result.map((diff, i) => (
-                                   <div 
-                                      key={i} 
-                                      onMouseEnter={() => setActiveDiffIndex(i)}
-                                      onMouseLeave={() => setActiveDiffIndex(null)}
-                                      className={`p-4 rounded-2xl border transition-all cursor-crosshair ${activeDiffIndex === i ? 'bg-rose-50 border-rose-200 dark:bg-rose-900/20 dark:border-rose-800 shadow-md shadow-rose-500/10 scale-[1.02]' : 'bg-slate-50 border-slate-100 dark:bg-slate-800/50 dark:border-slate-700 hover:border-slate-300'} `}
-                                   >
-                                       <div className="flex gap-3">
-                                           <div className={`h-6 w-6 rounded-full flex items-center justify-center flex-shrink-0 text-xs font-black ${activeDiffIndex === i ? 'bg-rose-500 text-white' : 'bg-slate-200 dark:bg-slate-700 text-slate-500'}`}>
-                                               {i + 1}
+                               result.lines.map((line, i) => (
+                                   line.is_diff ? (
+                                       <div key={i} className="flex flex-col gap-1.5 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 shadow-sm transition-all hover:border-blue-300 mt-4 mb-4">
+                                           <div className="flex items-start gap-3">
+                                                <span className="shrink-0 w-12 text-[10px] font-black tracking-wider uppercase text-rose-500 bg-rose-100 dark:bg-rose-900/50 px-2 py-1 rounded text-center">Doc 1</span>
+                                                <span className="text-rose-700 dark:text-rose-300 break-words pt-0.5">{line.doc1 || <em className="opacity-40 line-through">(ไม่มีข้อมูล)</em>}</span>
                                            </div>
-                                           <p className="text-sm font-medium text-slate-700 dark:text-slate-200 leading-relaxed pt-0.5">
-                                               {diff.description}
-                                           </p>
+                                           <div className="flex items-start gap-3">
+                                                <span className="shrink-0 w-12 text-[10px] font-black tracking-wider uppercase text-emerald-600 bg-emerald-100 dark:bg-emerald-900/50 px-2 py-1 rounded text-center">Doc 2</span>
+                                                <span className="text-emerald-700 dark:text-emerald-300 break-words font-medium pt-0.5">{line.doc2 || <em className="opacity-40 line-through">(ไม่มีข้อมูล)</em>}</span>
+                                           </div>
+                                           {files.length === 3 && (
+                                               <div className="flex items-start gap-3 mt-1 pt-1 border-t border-slate-200 dark:border-slate-700">
+                                                    <span className="shrink-0 w-12 text-[10px] font-black tracking-wider uppercase text-amber-600 bg-amber-100 dark:bg-amber-900/50 px-2 py-1 rounded text-center">Doc 3</span>
+                                                    <span className="text-amber-700 dark:text-amber-300 break-words pt-0.5">{line.doc3 || <em className="opacity-40 line-through">(ไม่มีข้อมูล)</em>}</span>
+                                               </div>
+                                           )}
                                        </div>
-                                       {/* Bbox missing notice */}
-                                       {((!diff.bbox1 || diff.bbox1.length < 4) && (!diff.bbox2 || diff.bbox2.length < 4)) && (
-                                            <p className="text-[10px] text-slate-400 mt-3 ml-9 italic flex items-center gap-1">
-                                                <svg className="w-3 h-3 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                                                No spatial bounding box matched
-                                            </p>
-                                       )}
-                                   </div>
+                                   ) : (
+                                       <div key={i} className="px-2 py-0.5 text-slate-500 dark:text-slate-400 opacity-60 hover:opacity-100 transition-opacity">
+                                            {line.text}
+                                       </div>
+                                   )
                                ))
                            )}
                         </div>
