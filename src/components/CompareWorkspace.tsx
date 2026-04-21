@@ -173,11 +173,26 @@ const extractDocOCR = async (file: File | null, url: string | null): Promise<OCR
     return items;
 };
 
-const fuzzyMatchOCRBoxes = (targetVal: string, ocrItems: OCRTextItem[]): HighlightBox[] => {
+const fuzzyMatchOCRBoxes = (targetVal: string, ocrItems: OCRTextItem[], counterpartVal?: string): HighlightBox[] => {
     if (!targetVal || typeof targetVal !== "string") return [];
     const clean = (s: string) => s.toLowerCase().replace(/[\s\n,.-]/g, "");
     const targetClean = clean(targetVal);
     if (!targetClean) return [];
+
+    let startIdx = 0;
+    let endIdx = targetClean.length;
+
+    if (counterpartVal && typeof counterpartVal === "string") {
+        const counterClean = clean(counterpartVal);
+        if (counterClean && targetClean !== counterClean) {
+            let pre = 0;
+            while (pre < targetClean.length && pre < counterClean.length && targetClean[pre] === counterClean[pre]) pre++;
+            let suf = 0;
+            while (suf < targetClean.length - pre && suf < counterClean.length - pre && targetClean[targetClean.length - 1 - suf] === counterClean[counterClean.length - 1 - suf]) suf++;
+            startIdx = pre;
+            endIdx = targetClean.length - suf;
+        }
+    }
 
     let bestScore = 0;
     let bestBoxes: HighlightBox[] = [];
@@ -185,10 +200,9 @@ const fuzzyMatchOCRBoxes = (targetVal: string, ocrItems: OCRTextItem[]): Highlig
     const mergeBoxes = (boxes: HighlightBox[]): HighlightBox[] => {
         if (boxes.length <= 1) return boxes.filter(b => b.width > 0.005 && b.height > 0.005);
         
-        // Sort boxes top-to-bottom, left-to-right
         const sorted = [...boxes].sort((a, b) => {
             if (a.page !== b.page) return a.page - b.page;
-            if (Math.abs(a.y - b.y) > 0.015) return a.y - b.y; // 1.5% vertical tolerance for same line
+            if (Math.abs(a.y - b.y) > 0.015) return a.y - b.y;
             return a.x - b.x;
         });
 
@@ -197,15 +211,12 @@ const fuzzyMatchOCRBoxes = (targetVal: string, ocrItems: OCRTextItem[]): Highlig
 
         for (let i = 1; i < sorted.length; i++) {
             const next = sorted[i];
-            
             const samePage = current.page === next.page;
-            // Check if on same line (y overlap or very close)
             const currentBottom = current.y + current.height;
             const nextBottom = next.y + next.height;
             const yOverlap = Math.max(0, Math.min(currentBottom, nextBottom) - Math.max(current.y, next.y));
             const isSameLine = samePage && (yOverlap > 0 || Math.abs(current.y - next.y) < Math.max(current.height, next.height) * 0.5);
             
-            // Allow merging if gap is small (up to 15% width of page, handles space between words)
             const horizontalGap = next.x - (current.x + current.width);
             const isCloseHorizontally = horizontalGap > -0.05 && horizontalGap < 0.15;
             
@@ -226,46 +237,82 @@ const fuzzyMatchOCRBoxes = (targetVal: string, ocrItems: OCRTextItem[]): Highlig
             }
         }
         merged.push(current);
-        
-        // Filter out micro-box noise (e.g., stray punctuation recognized as tiny boxes)
         return merged.filter(b => b.width > 0.005 && b.height > 0.005);
     };
 
     for (let i = 0; i < ocrItems.length; i++) {
         let currentString = "";
-        let currentBoxes: HighlightBox[] = [];
+        let currentBoxes: { box: HighlightBox, start: number, end: number }[] = [];
 
-        // Check sliding window of up to 40 semantic OCR blocks
         for (let j = i; j < Math.min(ocrItems.length, i + 40); j++) {
             const blockClean = clean(ocrItems[j].text);
             if (!blockClean) continue;
+            
+            const boxStart = currentString.length;
+            const boxEnd = boxStart + blockClean.length;
+            
             currentString += blockClean;
             currentBoxes.push({
-                page: ocrItems[j].page,
-                x: ocrItems[j].x,
-                y: ocrItems[j].y,
-                width: ocrItems[j].width,
-                height: ocrItems[j].height,
-                text: ocrItems[j].text,
+                box: {
+                    page: ocrItems[j].page,
+                    x: ocrItems[j].x,
+                    y: ocrItems[j].y,
+                    width: ocrItems[j].width,
+                    height: ocrItems[j].height,
+                    text: ocrItems[j].text,
+                },
+                start: boxStart,
+                end: boxEnd
             });
 
-            if (currentString === targetClean) {
-                return mergeBoxes(currentBoxes); // Exact match!
-            }
+            if (currentString.length >= targetClean.length - 2) {
+                let isMatch = false;
+                let score = 0;
+                let offset = 0;
 
-            if (targetClean.includes(currentString) || currentString.includes(targetClean)) {
-                // Good substring progression
-                const score = Math.min(currentString.length, targetClean.length) / Math.max(currentString.length, targetClean.length);
-                if (score > bestScore) {
-                    bestScore = score;
-                    bestBoxes = [...currentBoxes];
+                if (currentString.includes(targetClean)) {
+                    isMatch = true;
+                    offset = currentString.indexOf(targetClean);
+                    score = targetClean.length / currentString.length;
+                } else if (targetClean.includes(currentString)) {
+                    isMatch = true;
+                    offset = 0;
+                    score = currentString.length / targetClean.length;
+                } else {
+                    const lenRatio = Math.min(currentString.length, targetClean.length) / Math.max(currentString.length, targetClean.length);
+                    if (lenRatio > 0.8) {
+                        let matches = 0;
+                        for (let c = 0; c < Math.min(currentString.length, targetClean.length); c++) {
+                            if (currentString[c] === targetClean[c]) matches++;
+                        }
+                        const matchRatio = matches / Math.max(currentString.length, targetClean.length);
+                        if (matchRatio > 0.8) {
+                            isMatch = true;
+                            offset = 0;
+                            score = matchRatio;
+                        }
+                    }
                 }
-            } else if (currentString.length > targetClean.length + 5) {
-                break; // Window too large, abort this start position
+
+                if (isMatch && score > bestScore) {
+                    bestScore = score;
+                    const diffStart = offset + startIdx;
+                    const diffEnd = offset + endIdx;
+                    
+                    const overlappingBoxes = currentBoxes
+                        .filter(cb => Math.max(diffStart, cb.start) < Math.min(diffEnd, cb.end) || (diffStart === diffEnd && cb.start <= diffStart && cb.end >= diffEnd))
+                        .map(cb => cb.box);
+                    
+                    bestBoxes = overlappingBoxes.length > 0 ? overlappingBoxes : [currentBoxes[0].box];
+                }
+                
+                if (currentString.length > targetClean.length + 5) {
+                    break;
+                }
             }
         }
     }
-    return bestScore >= 0.75 ? mergeBoxes(bestBoxes) : [];
+    return bestScore > 0.4 ? mergeBoxes(bestBoxes) : [];
 };
 
 // ─── Preview Component ────────────────────────────────────────────────────────
@@ -541,8 +588,12 @@ export default function CompareWorkspace({ user }: Props) {
                     const locations: any = {};
                     ['doc1', 'doc2', 'doc3'].forEach((docKey, i) => {
                         const textVal = (f as any)[docKey];
+                        let counterpartVal = "";
+                        if (docKey === 'doc1') counterpartVal = (f as any)['doc2'] || "";
+                        else counterpartVal = (f as any)['doc1'] || "";
+
                         if (textVal && newOcrData[i] && newOcrData[i].length > 0) {
-                            const exactBoxes = fuzzyMatchOCRBoxes(String(textVal), newOcrData[i]);
+                            const exactBoxes = fuzzyMatchOCRBoxes(String(textVal), newOcrData[i], String(counterpartVal));
                             // Fallback to AI box if OCR fuzzy match fails severely
                             locations[docKey] = exactBoxes.length > 0 ? exactBoxes : (f.locations?.[docKey as keyof typeof f.locations] || []);
                         } else {
