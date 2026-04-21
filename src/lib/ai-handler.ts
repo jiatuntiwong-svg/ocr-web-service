@@ -1,7 +1,7 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 export async function getActiveAIConfigs(env: any): Promise<any[]> {
-    const row = await env.DB.prepare("SELECT value FROM system_settings WHERE key = 'AI_POWER_CONFIG'").first<{ value: string }>();
+    const row = await env.DB.prepare("SELECT value FROM system_settings WHERE key = 'AI_POWER_CONFIG'").first() as { value: string } | null;
     const dbConfig = row ? JSON.parse(row.value) : [];
 
     const envKey = env.GEMINI_API_KEY || "";
