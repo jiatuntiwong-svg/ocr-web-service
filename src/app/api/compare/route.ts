@@ -83,21 +83,37 @@ export async function POST(req: NextRequest) {
         {
             "key": "ชื่อหัวข้อ (เช่น วันที่, ยอดรวม, เงื่อนไขชำระเงิน)",
             "is_diff": false,
-            "doc1": "ค่าของหัวข้อนี้ (จะเหมือนกันทุกฉบับ)"
+            "doc1": "ค่าของหัวข้อนี้ (จะเหมือนกันทุกฉบับ)",
+            "locations": {
+                "doc1": [{ "page": 1, "x": 0.1, "y": 0.2, "width": 0.3, "height": 0.05, "text": "ค่าของข้อความ" }],
+                "doc2": [{ "page": 1, "x": 0.1, "y": 0.2, "width": 0.3, "height": 0.05 }]
+                ${files.length > 2 ? ',"doc3": [{ "page": 1, "x": 0.1, "y": 0.2, "width": 0.3, "height": 0.05 }]' : ''}
+            }
         },
         {
             "key": "ชื่อหัวข้อ (เช่น เงื่อนไขชำระเงิน)",
             "is_diff": true,
             "doc1": "ข้อมูลในฉบับที่ 1 (ถ้าไม่มีให้ใส่ null)",
             "doc2": "ข้อมูลในฉบับที่ 2 (ถ้าไม่มีให้ใส่ null)"
-            ${files.length > 2 ? ',\n            "doc3": "ข้อมูลในฉบับที่ 3 (ถ้าไม่มีให้ใส่ null)"' : ''}
+            ${files.length > 2 ? ',\n            "doc3": "ข้อมูลในฉบับที่ 3 (ถ้าไม่มีให้ใส่ null)"' : ''},
+            "locations": {
+                "doc1": [{ "page": 1, "x": 0.1, "y": 0.2, "width": 0.3, "height": 0.05 }],
+                "doc2": [{ "page": 1, "x": 0.1, "y": 0.25, "width": 0.3, "height": 0.05 }]
+                ${files.length > 2 ? ',"doc3": [{ "page": 1, "x": 0.1, "y": 0.25, "width": 0.3, "height": 0.05 }]' : ''}
+            }
         }
     ]
 }
+
 * กฎเหล็ก:
 1. เรียงลำดับ array "fields" ให้ครอบคลุมเนื้อหาสำคัญทั้งหมดของเอกสาร โดยเฉพาะหัวข้อที่มีความแตกต่างกัน
 2. หากหัวข้อไหนมีความแตกต่างกัน ให้ตั้ง is_diff เป็น true
-3. หากตารางรายการสินค้ามีความแตกต่าง ให้รวบรวมเป็นหัวข้อ "รายการสินค้า" และโชว์รายละเอียดที่ต่างไว้ใน doc1, doc2
+3. "locations" คือ กล่องพิกัด (Bounding Box) ของข้อความบนเอกสาร
+   - x, y คือพิกัด (0..1) ของมุมซ้ายบน
+   - width, height คือขนาดกว้างและสูง (0..1)
+   - page: หน้าของเอกสาร (เริ่มที่ 1) ถ้าเป็นเอกสารภาพให้ใช้ 1 เสมอ
+   - ตำแหน่ง highlight จะต้องตรงและครอบเฉพาะคำที่เกี่ยวข้องเท่านั้น อย่าครอบบล็อกใหญ่เกินจริง
+   - ถ้าหาตำแหน่งไม่พบ ให้ส่งเป็น array ว่าง ([]) ใน doc นั้น
 4. กรุณาตอบกลับแค่ JSON เพียวๆ ไม่มี markdown หรือ text อื่นนอกเหนือจากรูปแบบที่ระบุ`;
 
         const imagesData = await Promise.all(files.map(async f => {
@@ -120,10 +136,68 @@ export async function POST(req: NextRequest) {
 
         const processingTimeMs = Date.now() - startTime;
 
-        let extracted: any = { differences: [] };
+        let extracted: any = { summary: [], fields: [] };
         try {
             const match = text.match(/\{[\s\S]*\}/);
-            if (match) extracted = JSON.parse(match[0]);
+            if (match) {
+                extracted = JSON.parse(match[0]);
+                if (extracted.differences) {
+                    extracted.fields = extracted.differences;
+                    delete extracted.differences;
+                }
+                
+                // Sanitize locations
+                if (extracted.fields && Array.isArray(extracted.fields)) {
+                    const parseNum = (val: any, fallback: number): number => {
+                        if (typeof val === 'number') return val;
+                        if (typeof val === 'string') {
+                            const parsed = parseFloat(val);
+                            if (!isNaN(parsed)) return parsed;
+                        }
+                        return fallback;
+                    };
+
+                    extracted.fields.forEach((field: any) => {
+                        if (field.locations) {
+                            ['doc1', 'doc2', 'doc3'].forEach((docKey) => {
+                                if (field.locations[docKey] && Array.isArray(field.locations[docKey])) {
+                                    field.locations[docKey] = field.locations[docKey].map((loc: any) => {
+                                        let page = Math.max(1, Math.round(parseNum(loc.page, 1)));
+                                        let x = parseNum(loc.x, 0);
+                                        let y = parseNum(loc.y, 0);
+                                        let width = parseNum(loc.width, 0);
+                                        let height = parseNum(loc.height, 0);
+
+                                        let maxVal = Math.max(x, y, width, height);
+
+                                        // Auto-normalize if values look like scaled instead of 0..1
+                                        if (maxVal > 1) {
+                                            // Vision models often default to 0-1000 bounding boxes or 0-100 percentages
+                                            let scaleFactor = maxVal > 100 ? 1000 : 100;
+                                            x = x / scaleFactor;
+                                            y = y / scaleFactor;
+                                            width = width / scaleFactor;
+                                            height = height / scaleFactor;
+                                        }
+
+                                        // Clamp completely within 0..1
+                                        x = Math.max(0, Math.min(1, x));
+                                        y = Math.max(0, Math.min(1, y));
+                                        width = Math.max(0, Math.min(1, width));
+                                        height = Math.max(0, Math.min(1, height));
+                                        
+                                        // Ensure x + width doesn't overflow page
+                                        if (x + width > 1) width = 1 - x;
+                                        if (y + height > 1) height = 1 - y;
+
+                                        return { page, x, y, width, height, text: loc.text || "" };
+                                    });
+                                }
+                            });
+                        }
+                    });
+                }
+            }
         } catch (e) {
             return NextResponse.json({ error: "AI returned invalid format", raw: text }, { status: 502 });
         }

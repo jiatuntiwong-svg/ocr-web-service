@@ -1,10 +1,28 @@
 "use client";
 import React, { useState, useRef, useEffect } from "react";
 import { User } from "@/lib/types";
+import { Document, Page, pdfjs } from "react-pdf";
+import "react-pdf/dist/Page/TextLayer.css";
+import "react-pdf/dist/Page/AnnotationLayer.css";
+
+// pdfjs-dist v5 worker (installed locally)
+pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+    "pdfjs-dist/build/pdf.worker.min.mjs",
+    import.meta.url
+).toString();
 
 // ─── Shared Types ──────────────────────────────────
 interface ExtractField { id: string; name: string; type: "text" | "number" | "currency" | "date" | "address" | "email" | "table"; }
 interface Template { id: string; name: string; fields_json: string; user_id?: string; }
+
+interface HighlightBox {
+    page: number;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    text?: string;
+}
 
 interface CompareField {
     key: string;
@@ -12,6 +30,11 @@ interface CompareField {
     doc1?: string | null;
     doc2?: string | null;
     doc3?: string | null;
+    locations?: {
+        doc1?: HighlightBox[];
+        doc2?: HighlightBox[];
+        doc3?: HighlightBox[];
+    };
 }
 
 interface CompareResult {
@@ -44,6 +67,80 @@ const TYPE_ICONS: Record<string, React.ReactNode> = {
     table: <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M3 14h18m-9-4v8m-7 0h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>,
 };
 
+// ─── Preview Component ────────────────────────────────────────────────────────
+const DocumentPreviewWithHighlights = ({ file, url, idx, highlights = [], selectedFieldKey }: any) => {
+    const [numPages, setNumPages] = useState<number>();
+    const [pageNumber, setPageNumber] = useState<number>(1);
+    const containerRef = useRef<HTMLDivElement>(null);
+
+    const activeHighlights = highlights
+        .filter((h: any) => !selectedFieldKey || h.key === selectedFieldKey)
+        .flatMap((h: any) => h.boxes || []);
+
+    // Auto-jump to the page containing the first highlight for the selected field
+    useEffect(() => {
+        if (selectedFieldKey && activeHighlights.length > 0) {
+            const firstBox = activeHighlights[0];
+            if (firstBox && firstBox.page) {
+                setPageNumber(firstBox.page);
+            }
+        }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selectedFieldKey, highlights]);
+
+    if (!file) return null;
+
+    const renderHighlightBox = (box: any, i: number) => (
+        <div
+            key={i}
+            className="absolute border-2 border-blue-500 bg-blue-500/20 shadow-[0_0_8px_rgba(59,130,246,0.6)] z-20 pointer-events-none transition-all duration-300 animate-in fade-in zoom-in-95"
+            style={{
+                left: (box.x * 100).toFixed(4) + "%",
+                top: (box.y * 100).toFixed(4) + "%",
+                width: (box.width * 100).toFixed(4) + "%",
+                height: (box.height * 100).toFixed(4) + "%",
+            }}
+        />
+    );
+
+    return (
+        <div className="relative shadow-sm mx-auto w-full h-full min-h-[50vh] overflow-auto bg-slate-200/50 dark:bg-slate-900/50 flex justify-center p-4 custom-scrollbar" ref={containerRef}>
+            {file.type === "application/pdf" ? (
+                <div className="relative inline-block bg-white shadow-xl">
+                    <Document
+                        file={file}
+                        onLoadSuccess={({ numPages: np }) => setNumPages(np)}
+                        loading={<div className="w-full h-64 flex items-center justify-center text-slate-400 text-xs font-bold">กำลังโหลด PDF...</div>}
+                    >
+                        <Page
+                            pageNumber={pageNumber}
+                            renderTextLayer={false}
+                            renderAnnotationLayer={false}
+                            className="shadow-md transition-all relative"
+                        >
+                            {activeHighlights
+                                .filter((h: any) => h.page === pageNumber)
+                                .map(renderHighlightBox)}
+                        </Page>
+                    </Document>
+                    {numPages && numPages > 1 && (
+                        <div className="absolute -bottom-10 left-1/2 -translate-x-1/2 bg-slate-800 text-white px-4 py-1.5 rounded-full text-xs font-bold flex items-center gap-4 shadow-lg z-30">
+                            <button disabled={pageNumber <= 1} onClick={() => setPageNumber(p => p - 1)} className="hover:text-blue-400 disabled:opacity-30 transition-colors">&lt; Prev</button>
+                            <span>{pageNumber} / {numPages}</span>
+                            <button disabled={pageNumber >= numPages} onClick={() => setPageNumber(p => p + 1)} className="hover:text-blue-400 disabled:opacity-30 transition-colors">Next &gt;</button>
+                        </div>
+                    )}
+                </div>
+            ) : (
+                <div className="relative inline-block">
+                    <img src={url} alt={"Doc " + (idx + 1)} className="max-w-full h-auto pointer-events-none rounded-sm border border-slate-200 dark:border-slate-800 shadow-md block" />
+                    {activeHighlights.map(renderHighlightBox)}
+                </div>
+            )}
+        </div>
+    );
+};
+
 export default function CompareWorkspace({ user }: Props) {
     // ── Local State ──
     const [files, setFiles] = useState<(File | null)[]>([null, null]);
@@ -65,6 +162,7 @@ export default function CompareWorkspace({ user }: Props) {
     const [savingTemplate, setSavingTemplate] = useState(false);
 
     // Fields
+    const [selectedFieldKey, setSelectedFieldKey] = useState<string | null>(null);
     const [extractFields, setExtractFields] = useState<ExtractField[]>([
         { id: "1", name: "ประเภทเอกสาร", type: "text" },
         { id: "2", name: "เลขที่เอกสาร", type: "number" },
@@ -167,6 +265,7 @@ export default function CompareWorkspace({ user }: Props) {
             setFiles(newFiles);
             setPreviews(newPreviews);
             setResult(null); // Reset results on new upload
+            setSelectedFieldKey(null);
         }
     };
 
@@ -195,6 +294,7 @@ export default function CompareWorkspace({ user }: Props) {
         setLoading(true);
         setError(null);
         setResult(null);
+        setSelectedFieldKey(null);
 
         const formData = new FormData();
         if (user) formData.append("userId", user.id);
@@ -227,6 +327,19 @@ export default function CompareWorkspace({ user }: Props) {
     };
 
     const validFilesCount = files.filter(f => f !== null).length;
+
+    // Helper to get highlights per document
+    const getHighlightsForDoc = (docIndex: number) => {
+        if (!result || !result.fields) return [];
+        return result.fields.map(field => {
+            const docKey = `doc${docIndex + 1}` as keyof NonNullable<CompareField['locations']>;
+            const boxes = field.locations && field.locations[docKey] ? field.locations[docKey] : [];
+            return {
+                key: field.key,
+                boxes
+            };
+        }).filter(h => h.boxes && h.boxes.length > 0);
+    };
 
     // ── Filtered Templates ──────────────────────────────────────────────────────
     const filteredTemplates = templates.filter(t => {
@@ -478,13 +591,13 @@ export default function CompareWorkspace({ user }: Props) {
                                             <input type="file" className="hidden" accept="image/*,application/pdf" onChange={(e) => handleFileInput(idx, e)} />
                                         </label>
                                     ) : (
-                                        <div className="relative shadow-sm mx-auto w-full h-full min-h-[50vh]">
-                                            {files[idx]?.type === 'application/pdf' ? (
-                                                <iframe src={`${previews[idx]}#toolbar=0&navpanes=0`} className="w-full h-full min-h-[60vh] rounded-sm border border-slate-200 dark:border-slate-800" />
-                                            ) : (
-                                                <img src={previews[idx] as string} alt={`Doc ${idx+1}`} className="w-full h-auto pointer-events-none rounded-sm border border-slate-200 dark:border-slate-800" />
-                                            )}
-                                        </div>
+                                        <DocumentPreviewWithHighlights
+                                            file={files[idx]}
+                                            url={previews[idx]}
+                                            idx={idx}
+                                            highlights={getHighlightsForDoc(idx)}
+                                            selectedFieldKey={selectedFieldKey}
+                                        />
                                     )}
                                 </div>
                             </div>
@@ -525,8 +638,13 @@ export default function CompareWorkspace({ user }: Props) {
                                 ) : (
                                     result.fields.map((field, i) => (
                                         field.is_diff ? (
-                                            <div key={i} className="flex flex-col gap-1.5 p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 shadow-sm transition-all hover:border-blue-300 mt-4 mb-4">
-                                                <div className="text-xs font-black uppercase tracking-wider text-blue-600 dark:text-blue-400 mb-1 border-b border-slate-200 dark:border-slate-700 pb-2">{field.key}</div>
+                                            <div key={i} 
+                                                 onClick={() => setSelectedFieldKey(selectedFieldKey === field.key ? null : field.key)}
+                                                 className={`flex flex-col gap-1.5 p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border shadow-sm transition-all cursor-pointer hover:-translate-y-0.5 mt-4 mb-4 ${selectedFieldKey === field.key ? 'border-blue-500 ring-1 ring-blue-500 bg-blue-50/30 dark:bg-blue-900/10' : 'border-slate-200 dark:border-slate-700 hover:border-blue-300'}`}>
+                                                <div className="text-xs font-black uppercase tracking-wider text-blue-600 dark:text-blue-400 mb-1 border-b border-slate-200 dark:border-slate-700 pb-2 flex justify-between items-center">
+                                                    <span>{field.key}</span>
+                                                    {selectedFieldKey === field.key && <span className="text-[9px] bg-blue-100 dark:bg-blue-900/50 text-blue-600 dark:text-blue-400 px-2 py-0.5 rounded-full">Viewing Highlights</span>}
+                                                </div>
                                                 <div className="flex items-start gap-3 mt-1">
                                                         <span className="shrink-0 w-12 text-[10px] font-black tracking-wider uppercase text-rose-500 bg-rose-100 dark:bg-rose-900/50 px-2 py-1 rounded text-center">Doc 1</span>
                                                         <span className="text-rose-700 dark:text-rose-300 break-words pt-0.5 whitespace-pre-line">{field.doc1 || <em className="opacity-40 line-through">(ไม่มีข้อมูล)</em>}</span>
@@ -543,8 +661,13 @@ export default function CompareWorkspace({ user }: Props) {
                                                 )}
                                             </div>
                                         ) : (
-                                            <div key={i} className="px-3 py-2 flex items-start justify-between gap-4 text-slate-500 dark:text-slate-400 opacity-70 hover:opacity-100 transition-opacity bg-slate-50/50 dark:bg-slate-800/20 rounded-xl mb-1 border border-transparent hover:border-slate-200 dark:hover:border-slate-700">
-                                                    <span className="font-bold text-xs shrink-0 pt-0.5">{field.key}</span>
+                                            <div key={i} 
+                                                 onClick={() => setSelectedFieldKey(selectedFieldKey === field.key ? null : field.key)}
+                                                 className={`px-3 py-2 flex items-start justify-between gap-4 text-slate-500 dark:text-slate-400 opacity-70 hover:opacity-100 transition-all cursor-pointer rounded-xl mb-1 border ${selectedFieldKey === field.key ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-900/20 shadow-sm opacity-100' : 'border-transparent bg-slate-50/50 dark:bg-slate-800/20 hover:border-slate-300 dark:hover:border-slate-600'}`}>
+                                                    <span className="font-bold text-xs shrink-0 pt-0.5 flex items-center gap-2">
+                                                        {field.key}
+                                                        {selectedFieldKey === field.key && <span className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-pulse" />}
+                                                    </span>
                                                     <span className="text-xs truncate break-all max-w-[60%] text-right">{field.doc1}</span>
                                             </div>
                                         )

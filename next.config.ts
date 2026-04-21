@@ -7,7 +7,12 @@ if (process.env.NODE_ENV === "development") {
 }
 
 const nextConfig: NextConfig = {
-	/* config options here */
+	webpack: (config) => {
+		// pdfjs-dist v5 optionally requires 'canvas' (Node native module).
+		// Not needed in browser context — tell webpack to ignore it.
+		config.resolve.alias.canvas = false;
+		return config;
+	},
 };
 
 export default nextConfig;
