@@ -151,6 +151,7 @@ export default function CompareWorkspace({ user }: Props) {
     const [loading, setLoading] = useState(false);
     const [result, setResult] = useState<CompareResult | null>(null);
     const [error, setError] = useState<string | null>(null);
+    const [isExpandedView, setIsExpandedView] = useState(false);
 
     // Templates
     const [templates, setTemplates] = useState<Template[]>([]);
@@ -269,6 +270,7 @@ export default function CompareWorkspace({ user }: Props) {
             setPreviews(newPreviews);
             setResult(null); // Reset results on new upload
             setSelectedFieldKey(null);
+            setIsExpandedView(false);
         }
     };
 
@@ -276,6 +278,7 @@ export default function CompareWorkspace({ user }: Props) {
         if (files.length < 3) {
             setFiles([...files, null]);
             setPreviews([...previews, null]);
+            setIsExpandedView(false);
         }
     };
 
@@ -288,6 +291,7 @@ export default function CompareWorkspace({ user }: Props) {
         setFiles(newFiles);
         setPreviews(newPreviews);
         setResult(null);
+        setIsExpandedView(false);
     };
 
     const runComparison = async () => {
@@ -319,8 +323,10 @@ export default function CompareWorkspace({ user }: Props) {
             }
             if (data.extracted_data && Array.isArray(data.extracted_data.fields)) {
                 setResult(data.extracted_data);
+                setIsExpandedView(true);
             } else {
                 setResult({ summary: [], fields: [] }); // no diffs found
+                setIsExpandedView(true);
             }
         } catch (err: any) {
             setError(err.message || "An error occurred during comparison.");
@@ -354,6 +360,8 @@ export default function CompareWorkspace({ user }: Props) {
     const systemTemplates = filteredTemplates.filter(t => (t as any).user_id === "system");
     const myTemplates = filteredTemplates.filter(t => (t as any).user_id !== "system");
     const bookmarkedTemplates = filteredTemplates.filter(t => bookmarkedIds.includes(t.id));
+
+    const showExpandedWorkspace = Boolean(result) && isExpandedView;
 
     return (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start animate-in fade-in slide-in-from-bottom-4 duration-700">
@@ -466,7 +474,7 @@ export default function CompareWorkspace({ user }: Props) {
             </aside>
 
             {/* ── COLUMN 2: Main Workspace ─────────────────────────────────────── */}
-            <section className="lg:col-span-9 space-y-6 order-1 lg:order-2">
+            <section className={`lg:col-span-9 order-1 lg:order-2 ${showExpandedWorkspace ? 'flex flex-col h-[calc(100vh-100px)] sticky top-6 overflow-hidden space-y-4' : 'space-y-6'}`}>
 
                 {/* Header */}
                 <div className="bg-white/80 dark:bg-slate-900/80 backdrop-blur-md rounded-[1.75rem] border border-slate-200 dark:border-slate-800 p-6 flex items-center justify-between gap-4 shadow-sm">
@@ -492,6 +500,19 @@ export default function CompareWorkspace({ user }: Props) {
                                 <><div className="h-4 w-4 border-2 border-current border-t-transparent rounded-full animate-spin" /> Scanning...</>
                             ) : 'Run Comparison'}
                         </button>
+                        {result && (
+                            <button 
+                                onClick={() => setIsExpandedView(!isExpandedView)}
+                                className="px-4 py-3 rounded-xl font-black text-xs uppercase tracking-widest border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 transition-all flex items-center gap-2"
+                                title={isExpandedView ? "Collapse View" : "Expand Results"}
+                            >
+                                {isExpandedView ? (
+                                    <><svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" /></svg> Close Expanded View</>
+                                ) : (
+                                    <><svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" /></svg> Expand Results</>
+                                )}
+                            </button>
+                        )}
                     </div>
                 </div>
 
@@ -503,7 +524,7 @@ export default function CompareWorkspace({ user }: Props) {
                 )}
 
                 {/* ─ Field Mapping Card ─ */}
-                <div className="bg-white/80 dark:bg-slate-900/80 backdrop-blur-md rounded-[1.75rem] border border-slate-200 dark:border-slate-800 shadow-sm relative z-20">
+                <div className={`${showExpandedWorkspace ? 'hidden' : 'bg-white/80 dark:bg-slate-900/80 backdrop-blur-md rounded-[1.75rem] border border-slate-200 dark:border-slate-800 shadow-sm relative z-20'}`}>
                     <div className="px-6 py-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
                         <div className="flex items-center gap-2">
                             <svg className="w-4 h-4 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" /></svg>
@@ -567,11 +588,11 @@ export default function CompareWorkspace({ user }: Props) {
                 </div>
 
                 {/* ── Documents & Results Split Grid ── */}
-                <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 w-full">
+                <div className={`grid grid-cols-1 xl:grid-cols-12 gap-6 w-full ${showExpandedWorkspace ? 'flex-1 overflow-hidden' : ''}`}>
                     {/* Documents Grid */}
-                    <div className={`col-span-1 ${result ? 'xl:col-span-8' : 'xl:col-span-12'} grid grid-cols-1 ${files.length === 3 ? 'md:grid-cols-3' : 'md:grid-cols-2'} gap-4`}>
+                    <div className={`col-span-1 ${result ? 'xl:col-span-8' : 'xl:col-span-12'} grid grid-cols-1 ${files.length === 3 ? 'md:grid-cols-3' : 'md:grid-cols-2'} gap-4 ${showExpandedWorkspace ? 'h-full overflow-hidden' : ''}`}>
                         {files.map((file, idx) => (
-                            <div key={idx} className="bg-white/80 dark:bg-slate-900/80 backdrop-blur-md rounded-3xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col h-[70vh]">
+                            <div key={idx} className={`bg-white/80 dark:bg-slate-900/80 backdrop-blur-md rounded-3xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col ${showExpandedWorkspace ? 'h-full' : 'h-[70vh]'}`}>
                                 <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between bg-slate-50/50 dark:bg-slate-900/50">
                                     <span className="text-xs font-black uppercase text-slate-500 tracking-widest">Document #{idx + 1}</span>
                                     <div className="flex gap-2">
@@ -609,14 +630,19 @@ export default function CompareWorkspace({ user }: Props) {
 
                     {/* Results Panel */}
                     {result && (
-                        <div className="col-span-1 xl:col-span-4 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md rounded-3xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col h-[70vh]">
-                            <div className="px-5 py-4 border-b border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/50">
+                        <div className={`col-span-1 xl:col-span-4 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md rounded-3xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col ${showExpandedWorkspace ? 'h-full' : 'h-[70vh]'}`}>
+                            <div className="px-5 py-4 border-b border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/50 flex items-center justify-between">
                                 <h3 className="text-sm font-black flex items-center gap-2 text-slate-800 dark:text-white">
                                     <div className="h-6 w-6 rounded-md bg-blue-100 flex items-center justify-center text-blue-600">
                                         <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" /></svg>
                                     </div>
                                     {result.summary?.length > 0 && ` (${result.summary.length} จุดหลักที่พบ)`}
                                 </h3>
+                                {showExpandedWorkspace && (
+                                    <button onClick={() => setIsExpandedView(false)} className="text-slate-400 hover:text-rose-500 transition-colors bg-slate-100 dark:bg-slate-800 p-1.5 rounded-lg" title="Close Expanded View">
+                                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" /></svg>
+                                    </button>
+                                )}
                             </div>
                             
                             <div className="flex-1 p-4 overflow-y-auto space-y-2 custom-scrollbar font-mono text-sm leading-relaxed">
