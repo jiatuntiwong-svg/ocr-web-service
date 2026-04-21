@@ -1,5 +1,31 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
+export async function getActiveAIConfigs(env: any): Promise<any[]> {
+    const row = await env.DB.prepare("SELECT value FROM system_settings WHERE key = 'AI_POWER_CONFIG'").first<{ value: string }>();
+    const dbConfig = row ? JSON.parse(row.value) : [];
+
+    const envKey = env.GEMINI_API_KEY || "";
+    const envKeys = env.GEMINI_API_KEYS || "";
+    const envConfig: any[] = [];
+
+    if (envKey) envConfig.push({ id: 'env-gemini-single', provider: 'gemini', model: 'gemini-2.5-flash', apiKey: envKey, label: 'Environment Main Key', isEnv: true });
+    if (envKeys) {
+        envKeys.split(",").forEach((k: string, i: number) => {
+            if (k.trim()) envConfig.push({ id: `env-gemini-${i}`, provider: 'gemini', model: 'gemini-2.5-flash', apiKey: k.trim(), label: `Environment Key ${i + 1}`, isEnv: true });
+        });
+    }
+
+    const dbIds = new Set(dbConfig.map((c: any) => c.id));
+    const activeEnvConfig = envConfig.filter(c => !dbIds.has(c.id));
+
+    const all = [...activeEnvConfig, ...dbConfig].map(c => ({
+        ...c,
+        isActive: c.isActive !== false
+    }));
+
+    return all.filter(c => c.isActive);
+}
+
 export interface AIProviderRequest {
     provider: string;
     model: string;

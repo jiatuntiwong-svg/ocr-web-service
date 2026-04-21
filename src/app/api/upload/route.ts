@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
-import { generateWithAI } from "@/lib/ai-handler";
+import { generateWithAI, getActiveAIConfigs } from "@/lib/ai-handler";
 import { logSystemEvent } from "@/lib/logger";
 import { RETENTION_LIMITS } from "@/lib/devUsers";
 
@@ -59,15 +59,7 @@ export async function POST(request: NextRequest) {
     // ─── 2. Identify AI Config ──────────────────────────────────────────────────
     const runOCR = async () => {
       try {
-        let finalConfigs: any[] = [];
-        const result = await env.DB.prepare("SELECT value FROM system_settings WHERE key = 'AI_POWER_CONFIG'").first<{ value: string }>();
-        if (result) finalConfigs = JSON.parse(result.value);
-
-        // Fallback to Env if no DB config
-        if (finalConfigs.length === 0) {
-          const envKey = (env as any).GEMINI_API_KEY || (env as any).GEMINI_API_KEYS || "";
-          if (envKey) finalConfigs.push({ id: 'fallback', provider: 'gemini', model: 'gemini-2.5-flash', apiKey: envKey });
-        }
+        let finalConfigs = await getActiveAIConfigs(env);
 
         let target = finalConfigs.find(c => c.id === selectedModelId);
         if (!target) target = finalConfigs[0];

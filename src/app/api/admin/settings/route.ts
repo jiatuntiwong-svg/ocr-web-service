@@ -9,6 +9,7 @@ export interface AIConfig {
     apiKey: string;
     label: string;
     isEnv?: boolean;
+    isActive?: boolean;
 }
 
 export async function GET(req: NextRequest) {
@@ -47,7 +48,14 @@ export async function GET(req: NextRequest) {
         const row = await env.DB.prepare("SELECT value FROM system_settings WHERE key = 'AI_POWER_CONFIG'").first<{ value: string }>();
         const dbConfig: AIConfig[] = row ? JSON.parse(row.value) : [];
 
-        const all = [...envConfig, ...dbConfig];
+        // Deduplicate: if an env key state is saved in DB, use the DB version
+        const dbIds = new Set(dbConfig.map(c => c.id));
+        const activeEnvConfig = envConfig.filter(c => !dbIds.has(c.id));
+
+        const all = [...activeEnvConfig, ...dbConfig].map(c => ({
+            ...c,
+            isActive: c.isActive !== false // Default to true if undefined
+        }));
 
         // Mask keys for frontend
         const masked = all.map(c => ({
@@ -76,7 +84,7 @@ export async function POST(req: NextRequest) {
     if (caller?.role !== "admin") return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
     try {
-        const { action, config } = await req.json() as { action: 'add' | 'remove' | 'update', config: AIConfig };
+        const { action, config } = await req.json() as { action: 'add' | 'remove' | 'update' | 'toggle', config: AIConfig };
         const { env } = await getCloudflareContext();
 
         const row = await env.DB.prepare("SELECT value FROM system_settings WHERE key = 'AI_POWER_CONFIG'").first<{ value: string }>();
@@ -116,6 +124,24 @@ export async function POST(req: NextRequest) {
                 current.push({
                     ...config,
                     id: crypto.randomUUID(), // Give it a new real ID in DB
+                    apiKey: realApiKey
+                });
+            }
+        } else if (action === 'toggle') {
+            const index = current.findIndex(c => c.id === config.id);
+            if (index !== -1) {
+                // Update existing
+                current[index].isActive = config.isActive;
+            } else if (config.id.startsWith('env-')) {
+                // Overriding ENV default
+                let realApiKey = config.apiKey;
+                const isMasked = config.apiKey.includes("....") || config.apiKey === "****";
+                if (isMasked && config.provider === 'gemini') {
+                     // Best effort fallback to original ENV if masked
+                     realApiKey = (env as any).GEMINI_API_KEY || (env as any).GEMINI_API_KEYS || config.apiKey;
+                }
+                current.push({
+                    ...config,
                     apiKey: realApiKey
                 });
             }

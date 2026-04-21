@@ -204,9 +204,12 @@ export default function CompareWorkspace({ user }: Props) {
             .then(r => r.json())
             .then((data: any) => {
                 if (data.configs && data.configs.length > 0) {
-                    setAiModels(data.configs);
-                    const pro = data.configs.find((c: any) => c.model.includes('pro'));
-                    setTargetModelId(pro ? pro.id : data.configs[0].id);
+                    const activeConfigs = data.configs.filter((c: any) => c.isActive !== false);
+                    setAiModels(activeConfigs);
+                    if (activeConfigs.length > 0) {
+                        const pro = activeConfigs.find((c: any) => c.model.includes('pro'));
+                        setTargetModelId(pro ? pro.id : activeConfigs[0].id);
+                    }
                 }
             })
             .catch(console.error);

@@ -108,8 +108,11 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
             .then(r => r.json())
             .then((data: any) => {
                 if (data.configs && data.configs.length > 0) {
-                    setAiModels(data.configs);
-                    setSelectedModelId(data.configs[0].id);
+                    const activeConfigs = data.configs.filter((c: any) => c.isActive !== false);
+                    setAiModels(activeConfigs);
+                    if (activeConfigs.length > 0) {
+                        setSelectedModelId(activeConfigs[0].id);
+                    }
                 }
             })
             .catch(console.error);

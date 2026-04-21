@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
-import { generateWithAI } from "@/lib/ai-handler";
+import { generateWithAI, getActiveAIConfigs } from "@/lib/ai-handler";
 
 export async function POST(req: NextRequest) {
     try {
@@ -49,14 +49,7 @@ export async function POST(req: NextRequest) {
         }
 
         // 4. Retrieve AI Configuration
-        let finalConfigs: any[] = [];
-        const configResult = await env.DB.prepare("SELECT value FROM system_settings WHERE key = 'AI_POWER_CONFIG'").first<{ value: string }>();
-        if (configResult) finalConfigs = JSON.parse(configResult.value);
-
-        if (finalConfigs.length === 0) {
-            const envKey = (env as any).GEMINI_API_KEY || (env as any).GEMINI_API_KEYS || "";
-            if (envKey) finalConfigs.push({ id: 'fallback', provider: 'gemini', model: 'gemini-2.5-flash', apiKey: envKey });
-        }
+        let finalConfigs = await getActiveAIConfigs(env);
 
         let target = finalConfigs.find(c => c.id === selectedModelId);
         if (!target) target = finalConfigs[0];

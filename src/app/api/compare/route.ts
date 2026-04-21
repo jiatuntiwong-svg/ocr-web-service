@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { logSystemEvent } from "@/lib/logger";
-import { generateWithAI } from "@/lib/ai-handler";
+import { generateWithAI, getActiveAIConfigs } from "@/lib/ai-handler";
 
 export async function POST(req: NextRequest) {
     let userId = "guest";
@@ -47,14 +47,7 @@ export async function POST(req: NextRequest) {
         }
 
         // 2. Retrieve AI Configuration
-        let finalConfigs: any[] = [];
-        const configResult = await env.DB.prepare("SELECT value FROM system_settings WHERE key = 'AI_POWER_CONFIG'").first<{ value: string }>();
-        if (configResult) finalConfigs = JSON.parse(configResult.value);
-
-        if (finalConfigs.length === 0) {
-            const envKey = (env as any).GEMINI_API_KEY || (env as any).GEMINI_API_KEYS || "";
-            if (envKey) finalConfigs.push({ id: 'fallback', provider: 'gemini', model: 'gemini-1.5-pro', apiKey: envKey });
-        }
+        let finalConfigs = await getActiveAIConfigs(env);
 
         // Try to force a pro model if available for comparison because flash might struggle with bboxes and 2/3 images
         let target = finalConfigs.find(c => c.id === selectedModelId);

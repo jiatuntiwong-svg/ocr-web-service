@@ -110,6 +110,24 @@ export default function APISettingsView() {
         }
     };
 
+    const handleToggleActive = async (cfg: AIConfig) => {
+        setSubmitting(true);
+        try {
+            const res = await fetch("/api/admin/settings", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "toggle", config: { ...cfg, isActive: !cfg.isActive } }),
+            });
+            if (res.ok) {
+                await fetchSettings();
+            }
+        } catch (e) {
+            alert("Error updating config status");
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
     return (
         <div className="max-w-4xl space-y-8 animate-in fade-in slide-in-from-right-5 duration-700">
             <div className="bg-white dark:bg-slate-900 p-10 rounded-[2.5rem] border border-slate-200 dark:border-slate-800 shadow-sm relative overflow-hidden">
@@ -200,7 +218,7 @@ export default function APISettingsView() {
                         {configs.map((cfg) => (
                             <div
                                 key={cfg.id}
-                                className="bg-slate-50 dark:bg-slate-950 p-6 rounded-2xl border border-slate-100 dark:border-slate-800 flex flex-col justify-between min-h-[160px] group"
+                                className={`p-6 rounded-2xl border flex flex-col justify-between min-h-[160px] group transition-all opacity-100 ${cfg.isActive === false ? 'bg-slate-100 dark:bg-slate-900/50 border-slate-200 dark:border-slate-800/50 grayscale-[0.8]' : 'bg-slate-50 dark:bg-slate-950 border-slate-100 dark:border-slate-800'}`}
                             >
                                 <div>
                                     <div className="flex justify-between items-start mb-2">
@@ -220,10 +238,20 @@ export default function APISettingsView() {
                                     <p className="text-xs font-mono text-slate-500">{cfg.apiKey}</p>
                                 </div>
                                 <div className="flex items-center justify-between mt-4">
-                                    <div className="flex items-center gap-2">
-                                        <span className="text-[10px] bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 px-2 py-1 rounded-md font-bold">
-                                            Active
-                                        </span>
+                                    <div className="flex items-center gap-3">
+                                        {/* Toggle Active Button */}
+                                        <button 
+                                            onClick={() => handleToggleActive(cfg)}
+                                            disabled={submitting}
+                                            className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center justify-center rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${cfg.isActive !== false ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-700'}`}
+                                            title={cfg.isActive !== false ? "Click to Disable" : "Click to Enable"}
+                                        >
+                                            <span
+                                                aria-hidden="true"
+                                                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${cfg.isActive !== false ? 'translate-x-2' : '-translate-x-2'}`}
+                                            />
+                                        </button>
+
                                         <button
                                             onClick={() => handleEditStart(cfg)}
                                             className="text-[10px] text-blue-600 font-bold hover:underline"
