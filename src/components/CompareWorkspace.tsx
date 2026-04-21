@@ -182,6 +182,55 @@ const fuzzyMatchOCRBoxes = (targetVal: string, ocrItems: OCRTextItem[]): Highlig
     let bestScore = 0;
     let bestBoxes: HighlightBox[] = [];
 
+    const mergeBoxes = (boxes: HighlightBox[]): HighlightBox[] => {
+        if (boxes.length <= 1) return boxes.filter(b => b.width > 0.005 && b.height > 0.005);
+        
+        // Sort boxes top-to-bottom, left-to-right
+        const sorted = [...boxes].sort((a, b) => {
+            if (a.page !== b.page) return a.page - b.page;
+            if (Math.abs(a.y - b.y) > 0.015) return a.y - b.y; // 1.5% vertical tolerance for same line
+            return a.x - b.x;
+        });
+
+        const merged: HighlightBox[] = [];
+        let current = { ...sorted[0] };
+
+        for (let i = 1; i < sorted.length; i++) {
+            const next = sorted[i];
+            
+            const samePage = current.page === next.page;
+            // Check if on same line (y overlap or very close)
+            const currentBottom = current.y + current.height;
+            const nextBottom = next.y + next.height;
+            const yOverlap = Math.max(0, Math.min(currentBottom, nextBottom) - Math.max(current.y, next.y));
+            const isSameLine = samePage && (yOverlap > 0 || Math.abs(current.y - next.y) < Math.max(current.height, next.height) * 0.5);
+            
+            // Allow merging if gap is small (up to 15% width of page, handles space between words)
+            const horizontalGap = next.x - (current.x + current.width);
+            const isCloseHorizontally = horizontalGap > -0.05 && horizontalGap < 0.15;
+            
+            if (isSameLine && isCloseHorizontally) {
+                const minX = Math.min(current.x, next.x);
+                const minY = Math.min(current.y, next.y);
+                const maxX = Math.max(current.x + current.width, next.x + next.width);
+                const maxY = Math.max(currentBottom, nextBottom);
+                
+                current.x = minX;
+                current.y = minY;
+                current.width = maxX - minX;
+                current.height = maxY - minY;
+                current.text += " " + next.text;
+            } else {
+                merged.push(current);
+                current = { ...next };
+            }
+        }
+        merged.push(current);
+        
+        // Filter out micro-box noise (e.g., stray punctuation recognized as tiny boxes)
+        return merged.filter(b => b.width > 0.005 && b.height > 0.005);
+    };
+
     for (let i = 0; i < ocrItems.length; i++) {
         let currentString = "";
         let currentBoxes: HighlightBox[] = [];
@@ -201,7 +250,7 @@ const fuzzyMatchOCRBoxes = (targetVal: string, ocrItems: OCRTextItem[]): Highlig
             });
 
             if (currentString === targetClean) {
-                return currentBoxes; // Exact match!
+                return mergeBoxes(currentBoxes); // Exact match!
             }
 
             if (targetClean.includes(currentString) || currentString.includes(targetClean)) {
@@ -216,7 +265,7 @@ const fuzzyMatchOCRBoxes = (targetVal: string, ocrItems: OCRTextItem[]): Highlig
             }
         }
     }
-    return bestScore > 0.4 ? bestBoxes : [];
+    return bestScore >= 0.75 ? mergeBoxes(bestBoxes) : [];
 };
 
 // ─── Preview Component ────────────────────────────────────────────────────────
