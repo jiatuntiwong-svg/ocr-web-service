@@ -2,7 +2,9 @@
 import React, { useEffect } from "react";
 import DashboardView from "@/components/DashboardView";
 import OCRWorkspace from "@/components/OCRWorkspace";
-import CompareWorkspace from "@/components/CompareWorkspace";
+import dynamic from "next/dynamic";
+
+const CompareWorkspace = dynamic(() => import("@/components/CompareWorkspace"), { ssr: false });
 import AdminUsersView from "@/components/AdminUsersView";
 import AdminLogsView from "@/components/AdminLogsView";
 import BillingView from "@/components/BillingView";
