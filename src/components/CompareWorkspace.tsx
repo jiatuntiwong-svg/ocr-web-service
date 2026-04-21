@@ -107,7 +107,7 @@ const extractDocOCR = async (file: File | null, url: string | null): Promise<OCR
                         const scale = 1.5;
                         canvas.width = viewport.width * scale;
                         canvas.height = viewport.height * scale;
-                        await page.render({ canvasContext: ctx, viewport: page.getViewport({ scale }) }).promise;
+                        await page.render({ canvasContext: ctx, viewport: page.getViewport({ scale }) } as any).promise;
 
                         const Tesseract = await loadTesseract();
                         const worker = await Tesseract.createWorker("tha+eng");
