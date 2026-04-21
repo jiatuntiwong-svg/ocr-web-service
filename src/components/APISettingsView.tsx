@@ -8,6 +8,7 @@ interface AIConfig {
     apiKey: string;
     label: string;
     isEnv?: boolean;
+    isActive?: boolean;
 }
 
 export default function APISettingsView() {
