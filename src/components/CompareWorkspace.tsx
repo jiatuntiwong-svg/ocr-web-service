@@ -474,7 +474,7 @@ export default function CompareWorkspace({ user }: Props) {
             </aside>
 
             {/* ── COLUMN 2: Main Workspace ─────────────────────────────────────── */}
-            <section className={`lg:col-span-9 order-1 lg:order-2 ${showExpandedWorkspace ? 'flex flex-col h-[calc(100vh-100px)] sticky top-6 overflow-hidden space-y-4' : 'space-y-6'}`}>
+            <section className="lg:col-span-9 space-y-6 order-1 lg:order-2">
 
                 {/* Header */}
                 <div className="bg-white/80 dark:bg-slate-900/80 backdrop-blur-md rounded-[1.75rem] border border-slate-200 dark:border-slate-800 p-6 flex items-center justify-between gap-4 shadow-sm">
@@ -588,7 +588,7 @@ export default function CompareWorkspace({ user }: Props) {
                 </div>
 
                 {/* ── Documents & Results Split Grid ── */}
-                <div className={`grid grid-cols-1 xl:grid-cols-12 gap-6 w-full ${showExpandedWorkspace ? 'flex-1 overflow-hidden' : ''}`}>
+                <div className={showExpandedWorkspace ? "fixed inset-0 z-[100] bg-slate-100 dark:bg-slate-950 p-2 md:p-6 grid grid-cols-1 xl:grid-cols-12 gap-4 md:gap-6 w-screen h-screen overflow-hidden animate-in zoom-in-95 duration-300" : "grid grid-cols-1 xl:grid-cols-12 gap-6 w-full"}>
                     {/* Documents Grid */}
                     <div className={`col-span-1 ${result ? 'xl:col-span-8' : 'xl:col-span-12'} grid grid-cols-1 ${files.length === 3 ? 'md:grid-cols-3' : 'md:grid-cols-2'} gap-4 ${showExpandedWorkspace ? 'h-full overflow-hidden' : ''}`}>
                         {files.map((file, idx) => (
@@ -630,7 +630,7 @@ export default function CompareWorkspace({ user }: Props) {
 
                     {/* Results Panel */}
                     {result && (
-                        <div className={`col-span-1 xl:col-span-4 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md rounded-3xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col ${showExpandedWorkspace ? 'h-full' : 'h-[70vh]'}`}>
+                        <div className={`col-span-1 xl:col-span-4 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md rounded-3xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col ${showExpandedWorkspace ? 'h-full shadow-2xl' : 'h-[70vh]'}`}>
                             <div className="px-5 py-4 border-b border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/50 flex items-center justify-between">
                                 <h3 className="text-sm font-black flex items-center gap-2 text-slate-800 dark:text-white">
                                     <div className="h-6 w-6 rounded-md bg-blue-100 flex items-center justify-center text-blue-600">
@@ -639,8 +639,9 @@ export default function CompareWorkspace({ user }: Props) {
                                     {result.summary?.length > 0 && ` (${result.summary.length} จุดหลักที่พบ)`}
                                 </h3>
                                 {showExpandedWorkspace && (
-                                    <button onClick={() => setIsExpandedView(false)} className="text-slate-400 hover:text-rose-500 transition-colors bg-slate-100 dark:bg-slate-800 p-1.5 rounded-lg" title="Close Expanded View">
-                                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" /></svg>
+                                    <button onClick={() => setIsExpandedView(false)} className="flex items-center gap-2 text-xs font-black uppercase tracking-wider text-white bg-rose-500 hover:bg-rose-600 transition-colors p-2 px-3 rounded-lg shadow-md" title="Close Expanded View">
+                                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" /></svg>
+                                        ปิดโหมดเต็มจอ
                                     </button>
                                 )}
                             </div>
