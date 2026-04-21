@@ -67,6 +67,158 @@ const TYPE_ICONS: Record<string, React.ReactNode> = {
     table: <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M3 14h18m-9-4v8m-7 0h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>,
 };
 
+// ─── OCR Helper Functions ───────────────────────────────────────────────────────
+const loadTesseract = async (): Promise<any> => {
+    if ((window as any).Tesseract) return (window as any).Tesseract;
+    return new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js";
+        script.onload = () => resolve((window as any).Tesseract);
+        script.onerror = reject;
+        document.head.appendChild(script);
+    });
+};
+
+interface OCRTextItem {
+    page: number;
+    text: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+}
+
+const extractDocOCR = async (file: File | null, url: string | null): Promise<OCRTextItem[]> => {
+    if (!file || !url) return [];
+    const items: OCRTextItem[] = [];
+    try {
+        if (file.type === "application/pdf") {
+            const pdf = await pdfjs.getDocument(url).promise;
+            for (let i = 1; i <= pdf.numPages; i++) {
+                const page = await pdf.getPage(i);
+                const viewport = page.getViewport({ scale: 1 });
+                const textContent = await page.getTextContent();
+
+                if (textContent.items.length === 0) {
+                    // Scanned PDF -> render and OCR
+                    const canvas = document.createElement("canvas");
+                    const ctx = canvas.getContext("2d");
+                    if (ctx) {
+                        const scale = 1.5;
+                        canvas.width = viewport.width * scale;
+                        canvas.height = viewport.height * scale;
+                        await page.render({ canvasContext: ctx, viewport: page.getViewport({ scale }) }).promise;
+
+                        const Tesseract = await loadTesseract();
+                        const worker = await Tesseract.createWorker("tha+eng");
+                        const { data } = await worker.recognize(canvas);
+                        await worker.terminate();
+
+                        data.words.forEach((w: any) => {
+                            if (!w.text.trim()) return;
+                            items.push({
+                                page: i,
+                                text: w.text,
+                                x: w.bbox.x0 / canvas.width,
+                                y: w.bbox.y0 / canvas.height,
+                                width: (w.bbox.x1 - w.bbox.x0) / canvas.width,
+                                height: (w.bbox.y1 - w.bbox.y0) / canvas.height,
+                            });
+                        });
+                    }
+                } else {
+                    // Native PDF
+                    textContent.items.forEach((item: any) => {
+                        if (!item.str || item.str.trim().length === 0) return;
+                        const itemWidth = item.width || 0;
+                        const itemHeight = item.height || item.transform[3] || 10;
+                        const pdfX = item.transform[4];
+                        const pdfY = item.transform[5];
+
+                        const x = pdfX / viewport.width;
+                        const y = (viewport.height - pdfY - itemHeight) / viewport.height;
+                        const width = itemWidth / viewport.width;
+                        const height = itemHeight / viewport.height;
+
+                        items.push({ page: i, text: item.str, x, y, width, height });
+                    });
+                }
+            }
+        } else {
+            // Image OCR
+            const Tesseract = await loadTesseract();
+            const worker = await Tesseract.createWorker("tha+eng");
+            const { data } = await worker.recognize(url);
+            await worker.terminate();
+
+            const img = new Image();
+            img.src = url;
+            await new Promise((r) => (img.onload = r));
+
+            data.words.forEach((w: any) => {
+                if (!w.text.trim()) return;
+                items.push({
+                    page: 1,
+                    text: w.text,
+                    x: w.bbox.x0 / img.width,
+                    y: w.bbox.y0 / img.height,
+                    width: (w.bbox.x1 - w.bbox.x0) / img.width,
+                    height: (w.bbox.y1 - w.bbox.y0) / img.height,
+                });
+            });
+        }
+    } catch (e) {
+        console.error("OCR Extraction failed", e);
+    }
+    return items;
+};
+
+const fuzzyMatchOCRBoxes = (targetVal: string, ocrItems: OCRTextItem[]): HighlightBox[] => {
+    if (!targetVal || typeof targetVal !== "string") return [];
+    const clean = (s: string) => s.toLowerCase().replace(/[\s\n,.-]/g, "");
+    const targetClean = clean(targetVal);
+    if (!targetClean) return [];
+
+    let bestScore = 0;
+    let bestBoxes: HighlightBox[] = [];
+
+    for (let i = 0; i < ocrItems.length; i++) {
+        let currentString = "";
+        let currentBoxes: HighlightBox[] = [];
+
+        // Check sliding window of up to 40 semantic OCR blocks
+        for (let j = i; j < Math.min(ocrItems.length, i + 40); j++) {
+            const blockClean = clean(ocrItems[j].text);
+            if (!blockClean) continue;
+            currentString += blockClean;
+            currentBoxes.push({
+                page: ocrItems[j].page,
+                x: ocrItems[j].x,
+                y: ocrItems[j].y,
+                width: ocrItems[j].width,
+                height: ocrItems[j].height,
+                text: ocrItems[j].text,
+            });
+
+            if (currentString === targetClean) {
+                return currentBoxes; // Exact match!
+            }
+
+            if (targetClean.includes(currentString) || currentString.includes(targetClean)) {
+                // Good substring progression
+                const score = Math.min(currentString.length, targetClean.length) / Math.max(currentString.length, targetClean.length);
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestBoxes = [...currentBoxes];
+                }
+            } else if (currentString.length > targetClean.length + 5) {
+                break; // Window too large, abort this start position
+            }
+        }
+    }
+    return bestScore > 0.4 ? bestBoxes : [];
+};
+
 // ─── Preview Component ────────────────────────────────────────────────────────
 const DocumentPreviewWithHighlights = ({ file, url, idx, highlights = [], selectedFieldKey }: any) => {
     const [numPages, setNumPages] = useState<number>();
@@ -149,9 +301,11 @@ export default function CompareWorkspace({ user }: Props) {
     const [aiModels, setAiModels] = useState<any[]>([]);
 
     const [loading, setLoading] = useState(false);
+    const [processStep, setProcessStep] = useState<string>("");
     const [result, setResult] = useState<CompareResult | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [isExpandedView, setIsExpandedView] = useState(false);
+    const [ocrData, setOcrData] = useState<OCRTextItem[][]>([[], [], []]);
 
     // Templates
     const [templates, setTemplates] = useState<Template[]>([]);
@@ -299,6 +453,7 @@ export default function CompareWorkspace({ user }: Props) {
         if (validFiles.length < 2) return;
 
         setLoading(true);
+        setProcessStep("Analyzing AI and extracting accurate coordinates...");
         setError(null);
         setResult(null);
         setSelectedFieldKey(null);
@@ -315,13 +470,39 @@ export default function CompareWorkspace({ user }: Props) {
         });
 
         try {
-            const res = await fetch("/api/compare", { method: "POST", body: formData });
-            const data = await res.json() as any;
+            // Run AI Compare and OCR coordinate matching in parallel
+            const aiPromise = fetch("/api/compare", { method: "POST", body: formData }).then(r => r.json());
+            const ocrPromises = validFiles.map((file, idx) => extractDocOCR(file, previews[idx] as string));
 
-            if (!res.ok || !data.success) {
+            const [aiRes, ...ocrResults] = await Promise.all([aiPromise, ...ocrPromises] as const);
+            const data = aiRes as any;
+
+            if (!data.success) {
                 throw new Error(data.error || "Comparison failed");
             }
+
+            // Sync OCR data
+            const newOcrData: OCRTextItem[][] = [[], [], []];
+            ocrResults.forEach((res, i) => newOcrData[i] = res as OCRTextItem[]);
+            setOcrData(newOcrData);
+
             if (data.extracted_data && Array.isArray(data.extracted_data.fields)) {
+                // Enrich AI fields with actual OCR coordinates
+                const enrichedFields = data.extracted_data.fields.map((f: CompareField) => {
+                    const locations: any = {};
+                    ['doc1', 'doc2', 'doc3'].forEach((docKey, i) => {
+                        const textVal = (f as any)[docKey];
+                        if (textVal && newOcrData[i] && newOcrData[i].length > 0) {
+                            const exactBoxes = fuzzyMatchOCRBoxes(String(textVal), newOcrData[i]);
+                            // Fallback to AI box if OCR fuzzy match fails severely
+                            locations[docKey] = exactBoxes.length > 0 ? exactBoxes : (f.locations?.[docKey as keyof typeof f.locations] || []);
+                        } else {
+                            locations[docKey] = f.locations?.[docKey as keyof typeof f.locations] || [];
+                        }
+                    });
+                    return { ...f, locations };
+                });
+                data.extracted_data.fields = enrichedFields;
                 setResult(data.extracted_data);
                 setIsExpandedView(true);
             } else {
@@ -332,6 +513,7 @@ export default function CompareWorkspace({ user }: Props) {
             setError(err.message || "An error occurred during comparison.");
         } finally {
             setLoading(false);
+            setProcessStep("");
         }
     };
 
@@ -497,7 +679,7 @@ export default function CompareWorkspace({ user }: Props) {
                             className={`px-8 py-3 rounded-xl font-black text-xs uppercase tracking-widest transition-all shadow-md flex items-center gap-3 ${(loading || validFilesCount < 2 || extractFields.length === 0) ? 'bg-slate-200 dark:bg-slate-800 text-slate-400 cursor-not-allowed' : 'bg-blue-600 text-white hover:bg-blue-500 hover:shadow-blue-500/20 hover:-translate-y-0.5'}`}
                         >
                             {loading ? (
-                                <><div className="h-4 w-4 border-2 border-current border-t-transparent rounded-full animate-spin" /> Scanning...</>
+                                <><div className="h-4 w-4 border-2 border-current border-t-transparent rounded-full animate-spin" /> {processStep || "Scanning..."}</>
                             ) : 'Run Comparison'}
                         </button>
                         {result && (
