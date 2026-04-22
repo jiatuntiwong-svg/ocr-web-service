@@ -231,22 +231,20 @@ export async function POST(req: NextRequest) {
             })
         );
         
-        // Extract real OCR positioning concurrently with AI call
-        const tokenExtractionsPromise = Promise.all(
-            files.map((file, i) => extractDocumentTokens(fileBuffers[i], file.type || "image/jpeg"))
-        );
+        // Extract real OCR positioning sequentially to avoid Out-Of-Memory (OOM) in Cloudflare Worker
+        const documentTokens: OCRToken[][] = [];
+        for (let i = 0; i < files.length; i++) {
+            documentTokens.push(await extractDocumentTokens(fileBuffers[i], files[i].type || "image/jpeg"));
+        }
 
         const startTime = Date.now();
-        const [text, documentTokens] = await Promise.all([
-            generateWithAI({
-                provider: target.provider,
-                model: target.model,
-                prompt,
-                images: imagesData,
-                apiKeys: matchingKeys,
-            }),
-            tokenExtractionsPromise
-        ]);
+        const text = await generateWithAI({
+            provider: target.provider,
+            model: target.model,
+            prompt,
+            images: imagesData,
+            apiKeys: matchingKeys,
+        });
         const processingTimeMs = Date.now() - startTime;
 
         const extracted: { summary: string[]; fields: CompareField[] } = { summary: [], fields: [] };

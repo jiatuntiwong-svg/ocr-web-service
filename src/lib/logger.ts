@@ -20,7 +20,9 @@ export async function logSystemEvent(
             )
         `).run();
 
-        const id = crypto.randomUUID();
+        const id = typeof crypto !== "undefined" && crypto.randomUUID 
+                   ? crypto.randomUUID() 
+                   : Date.now().toString(36) + Math.random().toString(36).substring(2);
         await env.DB.prepare(`
             INSERT INTO system_logs (id, user_id, action, details, level)
             VALUES (?, ?, ?, ?, ?)

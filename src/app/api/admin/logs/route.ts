@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 
-export const runtime = "edge";
+
 
 function getSessionUser(req: NextRequest): { id?: string; role?: string } | null {
     const token = req.cookies.get("session")?.value;
