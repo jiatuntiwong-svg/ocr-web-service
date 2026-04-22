@@ -35,12 +35,18 @@ export async function extractTokensOnFrontend(file: File): Promise<OCRToken[]> {
                 for (const item of textContent.items as any[]) {
                     if (!item.str || item.str.trim() === "") continue;
 
-                    const x = item.transform[4] / viewport.width;
-                    let y = (viewport.height - item.transform[5]) / viewport.height;
-                    const width = item.width / viewport.width;
-                    const height = item.height / viewport.height;
-                    
-                    y = y - height;
+                    // Map PDF points to Viewport pixels accurately (handles CropBox, rotation, etc.)
+                    const [vx, vy] = viewport.convertToViewportPoint(item.transform[4], item.transform[5]);
+                    const [v_top_x, v_top_y] = viewport.convertToViewportPoint(item.transform[4], item.transform[5] + item.height);
+                    const [v_right_x, v_right_y] = viewport.convertToViewportPoint(item.transform[4] + item.width, item.transform[5]);
+
+                    const v_height = Math.abs(vy - v_top_y);
+                    const v_width = Math.abs(v_right_x - vx);
+
+                    const x = Math.min(vx, v_right_x) / viewport.width;
+                    const y = Math.min(vy, v_top_y) / viewport.height;
+                    const width = v_width / viewport.width;
+                    const height = v_height / viewport.height;
 
                     tokens.push({
                         text: item.str.trim(),
