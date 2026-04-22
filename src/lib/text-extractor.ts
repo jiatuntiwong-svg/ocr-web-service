@@ -360,6 +360,38 @@ export function matchValueToTokens(value: string, tokens: OCRToken[], isTableFie
         if (orig) return [orig];
     }
 
+    // Extended Multi-line Block Match Fallback
+    // Create sliding windows that merge tokens within a small Y-range
+    const sortedByY = [...normalizedTokens].sort((a, b) => Math.abs(a.y - b.y) > 0.02 ? a.y - b.y : a.x - b.x);
+    for (let i = 0; i < sortedByY.length; i++) {
+        const windowTokens: any[] = [];
+        const baseY = sortedByY[i].y;
+        for (let j = i; j < sortedByY.length; j++) {
+            if (sortedByY[j].y - baseY > 0.05) break; // Allow up to roughly 3 lines
+            windowTokens.push(sortedByY[j]);
+        }
+        
+        const windowText = windowTokens.map(t => t.cleanText).join("");
+        
+        // Find how many targetWords are in this block
+        let matches = 0;
+        for (const w of targetWords) {
+            if (windowText.includes(w)) matches++;
+        }
+        
+        if (matches / targetWords.length >= 0.7) {
+            // High confidence! Get original tokens
+            const matchedOrigins = windowTokens
+                .filter(wt => targetWords.some(tw => wt.cleanText.includes(tw) || tw.includes(wt.cleanText)))
+                .map(wt => tokens.find(t => t === wt || t.text === wt.text))
+                .filter(Boolean) as OCRToken[];
+                
+            if (matchedOrigins.length > 0) {
+                return matchedOrigins;
+            }
+        }
+    }
+
     return [];
 }
 

@@ -127,6 +127,8 @@ Rules:
 3. Do not add new fields. Do not rename fields.
 4. If a field is not found in a document, return null for that document.
 5. Set is_diff to true only when values differ across documents.
+6. VERY IMPORTANT: For fields that contain long text or terms (like 'เงื่อนไขชำระเงิน' or 'Payment Terms'), extract the EXACT text verbatim from the document. Include the label/prefix in the value. For example, output "เงื่อนไขชำระเงิน: เครดิต 30 วัน" instead of just "เครดิต 30 วัน". This allows exact block coordinates matching!
+7. For Table fields, extract the list of items exact as they appear, separating row items by newlines.
 
 Response schema:
 {

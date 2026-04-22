@@ -117,16 +117,23 @@ const DocumentPreviewWithHighlights = ({ file, url, idx, highlights = [], select
 
     // Recalculate pixel coordinates for images
     const recalculateImageHighlights = React.useCallback(() => {
-        if (!imgRef.current || file?.type === "application/pdf") return;
+        if (!imgRef.current || !containerRef.current || file?.type === "application/pdf") return;
         const el = imgRef.current;
+        const container = containerRef.current;
         if (!el.naturalWidth) return;
+
+        const mediaRect = el.getBoundingClientRect();
+        const containerRect = container.getBoundingClientRect();
+
+        const relativeOffsetX = mediaRect.left - containerRect.left;
+        const relativeOffsetY = mediaRect.top - containerRect.top;
 
         const { renderedW, renderedH, offsetX, offsetY } = getImageRenderedRect(el);
 
         const rects = activeHighlights.map((box: any) => ({
             position: 'absolute' as const,
-            left: offsetX + box.x * renderedW + "px",
-            top: offsetY + box.y * renderedH + "px",
+            left: relativeOffsetX + offsetX + box.x * renderedW + "px",
+            top: relativeOffsetY + offsetY + box.y * renderedH + "px",
             width: box.width * renderedW + "px",
             height: box.height * renderedH + "px",
             border: '2px solid rgba(59, 130, 246, 0.9)',
