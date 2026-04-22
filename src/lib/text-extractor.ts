@@ -1,13 +1,14 @@
-import { getDocument, GlobalWorkerOptions } from "pdfjs-dist/legacy/build/pdf.mjs";
+import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { OCRToken } from "./types";
 // tesseract.js and image-size are optional – loaded dynamically so esbuild
 // never bundles their native .node binaries into the Cloudflare Worker.
-
-GlobalWorkerOptions.workerSrc = `pdfjs-dist/legacy/build/pdf.worker.mjs`;
+// pdfjs-dist: do NOT set GlobalWorkerOptions.workerSrc here.
+// We use disableWorker:true in every getDocument() call so it works in both
+// Node.js and the Cloudflare Workers runtime (no Web Worker / importScripts).
 
 async function extractPdfTokens(fileBuffer: ArrayBuffer): Promise<OCRToken[]> {
     const tokens: OCRToken[] = [];
-    const loadingTask = getDocument({ data: new Uint8Array(fileBuffer) });
+    const loadingTask = getDocument({ data: new Uint8Array(fileBuffer), disableWorker: true } as any);
     const pdf = await loadingTask.promise;
 
     for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
@@ -63,7 +64,7 @@ export async function extractDocumentTokens(
             // eslint-disable-next-line @typescript-eslint/no-var-requires
             const { default: Tesseract } = require("tesseract.js");
 
-            const loadingTask = getDocument({ data: new Uint8Array(fileBuffer) });
+            const loadingTask = getDocument({ data: new Uint8Array(fileBuffer), disableWorker: true } as any);
             const pdf = await loadingTask.promise;
             const worker = await Tesseract.createWorker("tha+eng");
             const allTokens: OCRToken[] = [];

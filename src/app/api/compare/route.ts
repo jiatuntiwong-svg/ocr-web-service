@@ -334,9 +334,13 @@ export async function POST(req: NextRequest) {
         });
     } catch (error: any) {
         console.error("[Compare POST] error:", error);
-        const { env } = await getCloudflareContext();
-        if (env) {
-            await logSystemEvent(env, "COMPARE_ERROR", error.message, "error", userId);
+        try {
+            const { env } = await getCloudflareContext();
+            if (env) {
+                await logSystemEvent(env, "COMPARE_ERROR", error.message, "error", userId);
+            }
+        } catch (_) {
+            // logging failure must not prevent the JSON error response
         }
         return NextResponse.json({ error: error.message || "Internal server error" }, { status: 500 });
     }
