@@ -248,74 +248,94 @@ function buildTableStructure(tokens: OCRToken[]): TableRow[] {
 }
 
 export function matchValueToTokens(value: string, tokens: OCRToken[], isTableField: boolean = false, counterpartVal?: string): OCRToken[] {
-    if (!value) return [];
+    if (!value || tokens.length === 0) return [];
     
-    // Normalize string to match token words, preserving Thai characters
-    const normalizeStr = (s: string) => s.trim().toLowerCase().replace(/[^\w\s\u0E00-\u0E7F]/g, "");
+    // Normalize string preserving Thai characters and digits
+    const normalizeStr = (s: string) => s.trim().toLowerCase().replace(/[^\w\s\u0E00-\u0E7F0-9]/g, " ").replace(/\s+/g, " ").trim();
     
     const normalizedTokens = tokens.map(t => ({
         ...t,
-        cleanText: t.text.toLowerCase().replace(/[^\w\s\u0E00-\u0E7F]/g, "")
+        cleanText: normalizeStr(t.text)
     }));
 
     // For tables, use context-aware row and cell diffing
-    if (isTableField && counterpartVal) {
+    if (isTableField) {
         const valLines = value.split('\n').map(l => l.trim()).filter(Boolean);
-        const counterLines = counterpartVal.split('\n').map(l => l.trim()).filter(Boolean);
-        
-        const diffLinesInfo = [];
-        for (let i = 0; i < valLines.length; i++) {
-            if (valLines[i] !== counterLines[i]) {
-                diffLinesInfo.push({ valLine: valLines[i], counterLine: counterLines[i] || "" });
-            }
-        }
+        const counterLines = (counterpartVal || '').split('\n').map(l => l.trim()).filter(Boolean);
         
         const rows = buildTableStructure(normalizedTokens);
-        let matchInfo: OCRToken[] = [];
+        const matchInfo: OCRToken[] = [];
 
-        for (const diffInfo of diffLinesInfo) {
-            const targetWords = normalizeStr(diffInfo.valLine).split(/\s+/).filter(Boolean);
-            if (targetWords.length === 0) continue;
+        for (let lineIdx = 0; lineIdx < valLines.length; lineIdx++) {
+            const valLine = valLines[lineIdx];
+            const counterLine = counterLines[lineIdx] || "";
             
-            // 1) Find the target Row
+            // Only highlight rows that differ (or all if no counterpart)
+            const lineDiffers = !counterpartVal || valLine !== counterLine;
+            if (!lineDiffers) continue;
+
+            const targetWords = normalizeStr(valLine).split(/\s+/).filter(Boolean);
+            if (targetWords.length === 0) continue;
+
+            // Score each row for how well it matches the target value line
             let bestRow: TableRow | null = null;
             let bestScore = 0;
             for (const row of rows) {
                 let matches = 0;
-                for (const mw of targetWords) {
-                    if (row.cleanText.includes(mw)) matches++;
+                for (const tw of targetWords) {
+                    // Exact word match OR numeric substring match
+                    if (row.cleanText.includes(tw)) matches++;
+                    else if (/^\d/.test(tw) && row.cleanText.split(/\s+/).some(rt => rt === tw)) matches += 0.8;
                 }
                 const score = matches / Math.max(targetWords.length, 1);
-                if (score > bestScore && score > 0.3) {
+                if (score > bestScore && score > 0.25) {
                     bestScore = score;
                     bestRow = row;
                 }
             }
             
             if (bestRow) {
-                // 2) Split valLine and counterLine to words
-                const valWords = targetWords;
-                const counterWords = normalizeStr(diffInfo.counterLine).split(/\s+/).filter(Boolean);
-                
-                // Which physical cells changed?
-                for (const cell of bestRow.cells) {
-                    const cellText = cell.cleanText;
-                    if (!cellText) continue;
-
-                    let foundInVal = valWords.some(vw => cellText.includes(vw) || vw.includes(cellText));
-                    let foundInCounter = counterWords.some(cw => cellText.includes(cw) || cw.includes(cellText));
+                if (counterpartVal) {
+                    // Highlight only the cells that changed vs counterpart
+                    const counterWords = normalizeStr(counterLine).split(/\s+/).filter(Boolean);
+                    let foundDiffCell = false;
                     
-                    if (foundInVal && !foundInCounter) {
-                        // This specific physical cell has changed! Highlight tokens inside it!
-                        for (let t of cell.tokens) {
+                    for (const cell of bestRow.cells) {
+                        const cellText = cell.cleanText;
+                        if (!cellText || cellText.length < 1) continue;
+
+                        const inVal = targetWords.some(vw => cellText.includes(vw) || vw.includes(cellText));
+                        const inCounter = counterWords.some(cw => cellText.includes(cw) || cw.includes(cellText));
+                        
+                        if (inVal && !inCounter) {
+                            // This cell changed — highlight its tokens
+                            for (const t of cell.tokens) {
+                                const orig = tokens.find(ot => ot === t || ot.text === t.text);
+                                if (orig && !matchInfo.includes(orig)) matchInfo.push(orig);
+                            }
+                            foundDiffCell = true;
+                        }
+                    }
+                    
+                    // Fallback: if no specific cell found, highlight the whole row
+                    if (!foundDiffCell) {
+                        for (const t of bestRow.tokens) {
                             const orig = tokens.find(ot => ot === t || ot.text === t.text);
                             if (orig && !matchInfo.includes(orig)) matchInfo.push(orig);
                         }
                     }
+                } else {
+                    // No counterpart — highlight the best-matching row entirely
+                    for (const t of bestRow.tokens) {
+                        const orig = tokens.find(ot => ot === t || ot.text === t.text);
+                        if (orig && !matchInfo.includes(orig)) matchInfo.push(orig);
+                    }
                 }
             }
         }
-        return matchInfo;
+        
+        // If we got table matches return them, otherwise fall through to text matching
+        if (matchInfo.length > 0) return matchInfo;
     }
 
     // For regular fields

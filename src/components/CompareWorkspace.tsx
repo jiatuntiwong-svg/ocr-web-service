@@ -98,7 +98,9 @@ const DocumentPreviewWithHighlights = ({ file, url, idx, highlights = [], select
     const [pageNumber, setPageNumber] = useState<number>(1);
     const containerRef = useRef<HTMLDivElement>(null);
     const imgRef = useRef<HTMLImageElement>(null);
+    const pdfPageRef = useRef<HTMLDivElement>(null);
     const [imageRects, setImageRects] = useState<React.CSSProperties[]>([]);
+    const [pdfPageWidth, setPdfPageWidth] = useState<number>(0);
 
     const activeHighlights = highlights
         .filter((h: any) => !selectedFieldKey || h.key === selectedFieldKey)
@@ -156,6 +158,17 @@ const DocumentPreviewWithHighlights = ({ file, url, idx, highlights = [], select
         return () => ro.disconnect();
     }, [recalculateImageHighlights, file?.type]);
 
+    // For PDFs: track rendered page width via ResizeObserver
+    useEffect(() => {
+        const el = pdfPageRef.current;
+        if (!el || file?.type !== "application/pdf") return;
+        const ro = new ResizeObserver(() => {
+            setPdfPageWidth(el.clientWidth);
+        });
+        ro.observe(el);
+        return () => ro.disconnect();
+    }, [file?.type]);
+
     if (!file) return null;
 
     const renderPdfHighlightBox = (box: any, i: number) => (
@@ -174,7 +187,7 @@ const DocumentPreviewWithHighlights = ({ file, url, idx, highlights = [], select
     return (
         <div className="relative shadow-sm mx-auto w-full h-full min-h-[50vh] overflow-auto bg-slate-200/50 dark:bg-slate-900/50 flex justify-center p-4 custom-scrollbar" ref={containerRef}>
             {file.type === "application/pdf" ? (
-                <div className="relative inline-block bg-white shadow-xl">
+                <div className="relative inline-block bg-white shadow-xl" ref={pdfPageRef}>
                     <Document
                         file={file}
                         onLoadSuccess={({ numPages: np }) => setNumPages(np)}
@@ -184,7 +197,11 @@ const DocumentPreviewWithHighlights = ({ file, url, idx, highlights = [], select
                             pageNumber={pageNumber}
                             renderTextLayer={false}
                             renderAnnotationLayer={false}
+                            width={pdfPageWidth || undefined}
                             className="shadow-md transition-all relative"
+                            onRenderSuccess={() => {
+                                if (pdfPageRef.current) setPdfPageWidth(pdfPageRef.current.clientWidth);
+                            }}
                         >
                             {activeHighlights
                                 .filter((h: any) => h.page === pageNumber)
