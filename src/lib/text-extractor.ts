@@ -9,9 +9,20 @@ import { OCRToken } from "./types";
 async function extractPdfTokens(fileBuffer: ArrayBuffer): Promise<OCRToken[]> {
     const tokens: OCRToken[] = [];
     try {
-        const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+        // Polyfill DOM objects required by the browser build of pdf.js
+        if (typeof globalThis.DOMMatrix === 'undefined') {
+            (globalThis as any).DOMMatrix = class DOMMatrix {
+                a = 1; b = 0; c = 0; d = 1; e = 0; f = 0;
+            };
+        }
+        if (typeof globalThis.Path2D === 'undefined') {
+            (globalThis as any).Path2D = class Path2D {};
+        }
+
+        // @ts-ignore
+        const pdfjs = await import("pdfjs-dist/build/pdf.mjs");
         const getDocument = pdfjs.getDocument;
-        const loadingTask = getDocument({ data: new Uint8Array(fileBuffer), disableWorker: true } as any);
+        const loadingTask = getDocument({ data: new Uint8Array(fileBuffer), disableWorker: true, standardFontDataUrl: 'standard_fonts/' } as any);
         const pdf = await loadingTask.promise;
 
         for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
@@ -72,9 +83,18 @@ export async function extractDocumentTokens(
             const { default: Tesseract } = require("tesseract.js");
 
             // Load pdf.js dynamically to avoid top-level crash on edge
-            const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+            if (typeof globalThis.DOMMatrix === 'undefined') {
+                (globalThis as any).DOMMatrix = class DOMMatrix {
+                    a = 1; b = 0; c = 0; d = 1; e = 0; f = 0;
+                };
+            }
+            if (typeof globalThis.Path2D === 'undefined') {
+                (globalThis as any).Path2D = class Path2D {};
+            }
+            // @ts-ignore
+            const pdfjs = await import("pdfjs-dist/build/pdf.mjs");
             const getDocument = pdfjs.getDocument;
-            const loadingTask = getDocument({ data: new Uint8Array(fileBuffer), disableWorker: true } as any);
+            const loadingTask = getDocument({ data: new Uint8Array(fileBuffer), disableWorker: true, standardFontDataUrl: 'standard_fonts/' } as any);
             const pdf = await loadingTask.promise;
             const worker = await Tesseract.createWorker("tha+eng");
             const allTokens: OCRToken[] = [];
