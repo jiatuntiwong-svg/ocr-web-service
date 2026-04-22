@@ -1,7 +1,7 @@
 import { getDocument, GlobalWorkerOptions } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { OCRToken } from "./types";
-import Tesseract from "tesseract.js";
-import sizeOf from "image-size";
+// tesseract.js and image-size are optional – loaded dynamically so esbuild
+// never bundles their native .node binaries into the Cloudflare Worker.
 
 GlobalWorkerOptions.workerSrc = `pdfjs-dist/legacy/build/pdf.worker.mjs`;
 
@@ -53,10 +53,16 @@ export async function extractDocumentTokens(
             console.error("PDF token extraction failed, falling back to OCR", err);
         }
 
-        // Fallback for Scanned PDF
+        // Fallback for Scanned PDF using canvas + Tesseract (Node.js only, not Cloudflare edge)
         try {
             console.log("Rendering scanned PDF to canvas for OCR...");
+            // Dynamic require so esbuild treats these as external and
+            // does NOT bundle the native .node binary into the CF Worker.
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
             const { createCanvas } = require("canvas");
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            const { default: Tesseract } = require("tesseract.js");
+
             const loadingTask = getDocument({ data: new Uint8Array(fileBuffer) });
             const pdf = await loadingTask.promise;
             const worker = await Tesseract.createWorker("tha+eng");
@@ -88,14 +94,19 @@ export async function extractDocumentTokens(
             await worker.terminate();
             return allTokens;
         } catch (e) {
-             console.error("PDF canvas render or OCR failed", e);
+            // canvas or tesseract not available (Cloudflare edge) – skip silently
+            console.warn("Scanned-PDF OCR skipped (canvas/tesseract not available in this runtime)", (e as any)?.message);
         }
         return [];
     }
 
-    // Image OCR with Tesseract
+    // Image OCR with Tesseract (dynamic require – optional, not available on CF edge)
     try {
-        console.log("Running Tesseract OCR for image fallback...");
+        console.log("Running Tesseract OCR for image...");
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { default: Tesseract } = require("tesseract.js");
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { default: sizeOf } = require("image-size");
         const buffer = Buffer.from(fileBuffer);
         const dimensions = sizeOf(buffer);
         const width = dimensions.width || 1;
@@ -121,7 +132,8 @@ export async function extractDocumentTokens(
         }
         return tokens;
     } catch (error) {
-        console.error("Tesseract token extraction failed", error);
+        // tesseract/image-size not available in this runtime
+        console.warn("Image OCR skipped (tesseract/image-size not available in this runtime)", (error as any)?.message);
     }
     return [];
 }
