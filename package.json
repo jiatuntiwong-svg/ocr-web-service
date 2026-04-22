@@ -26,7 +26,6 @@
 		"xlsx": "^0.18.5"
 	},
 	"optionalDependencies": {
-		"canvas": "^3.2.3",
 		"image-size": "^1.1.1",
 		"tesseract.js": "^5.1.0"
 	},
