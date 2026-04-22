@@ -11,8 +11,8 @@ Read the documentation at https://opennext.js.org/cloudflare.
 Run the Next.js development server:
 
 ```bash
-npm run dev
-# or similar package manager command
+D:\nodejs\npm.cmd run dev
+# or alternatively, add D:\nodejs\ to your System PATH environment variable
 ```
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
@@ -24,8 +24,7 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 Preview the application locally on the Cloudflare runtime:
 
 ```bash
-npm run preview
-# or similar package manager command
+D:\nodejs\npm.cmd run preview
 ```
 
 ## Deploy
@@ -33,9 +32,24 @@ npm run preview
 Deploy the application to Cloudflare:
 
 ```bash
-npm run deploy
-# or similar package manager command
+D:\nodejs\npm.cmd run deploy
 ```
+
+---
+
+## 🛠 Troubleshooting: NPM Command Not Found
+
+If you normally encounter `The term 'npm' is not recognized` when running commands in this project, it is because **Node.js is installed on your D: drive**. 
+
+Your active `npm` executable is located at:
+👉 **`D:\nodejs\npm.cmd`**
+
+**How to fix or bypass this:**
+1. **Immediate workaround:** Use the absolute path exactly when you want to run `npm install` or other commands. For example:
+   ```bash
+   D:\nodejs\npm.cmd install
+   ```
+2. **Permanent solution:** Add `D:\nodejs` to your Windows System Environment Variables `PATH`. Once added and your terminal is restarted, you can just type `npm install` normally.
 
 ## Learn More
 

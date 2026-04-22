@@ -2,41 +2,201 @@ import { NextRequest, NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { logSystemEvent } from "@/lib/logger";
 import { generateWithAI, getActiveAIConfigs } from "@/lib/ai-handler";
+import { extractDocumentTokens, matchValueToTokens, mergeTokenBoxes } from "@/lib/text-extractor";
+import { OCRToken } from "@/lib/types";
+
+type HighlightBox = {
+    page: number;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    text?: string;
+};
+
+type CompareField = {
+    key: string;
+    is_diff: boolean;
+    doc1?: string | null;
+    doc2?: string | null;
+    doc3?: string | null;
+    locations?: {
+        doc1?: HighlightBox[];
+        doc2?: HighlightBox[];
+        doc3?: HighlightBox[];
+    };
+};
+
+const DOC_KEYS = ["doc1", "doc2", "doc3"] as const;
+
+function parseSelectedFields(raw: string | null): string[] {
+    return (raw || "")
+        .split(",")
+        .map((field) => field.trim())
+        .filter(Boolean);
+}
+
+function normalizeFieldKey(value: unknown): string {
+    return String(value || "")
+        .trim()
+        .replace(/\s+/g, " ")
+        .toLowerCase();
+}
+
+function parseNumber(value: unknown, fallback: number): number {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string") {
+        const parsed = Number.parseFloat(value);
+        if (Number.isFinite(parsed)) return parsed;
+    }
+    return fallback;
+}
+
+function sanitizeLocation(loc: any): HighlightBox {
+    let page = Math.max(1, Math.round(parseNumber(loc?.page, 1)));
+    let x = parseNumber(loc?.x, 0);
+    let y = parseNumber(loc?.y, 0);
+    let width = parseNumber(loc?.width, 0);
+    let height = parseNumber(loc?.height, 0);
+
+    const maxVal = Math.max(x, y, width, height);
+    if (maxVal > 1) {
+        const scaleFactor = maxVal > 100 ? 1000 : 100;
+        x /= scaleFactor;
+        y /= scaleFactor;
+        width /= scaleFactor;
+        height /= scaleFactor;
+    }
+
+    x = Math.max(0, Math.min(1, x));
+    y = Math.max(0, Math.min(1, y));
+    width = Math.max(0, Math.min(1, width));
+    height = Math.max(0, Math.min(1, height));
+
+    if (x + width > 1) width = 1 - x;
+    if (y + height > 1) height = 1 - y;
+
+    return {
+        page,
+        x,
+        y,
+        width,
+        height,
+        text: typeof loc?.text === "string" ? loc.text : "",
+    };
+}
+
+function sanitizeLocations(locations: any) {
+    const sanitized: CompareField["locations"] = {};
+
+    for (const docKey of DOC_KEYS) {
+        if (Array.isArray(locations?.[docKey])) {
+            sanitized[docKey] = locations[docKey].map(sanitizeLocation);
+        }
+    }
+
+    return sanitized;
+}
+
+function createEmptyField(key: string, fileCount: number): CompareField {
+    return {
+        key,
+        is_diff: false,
+        doc1: null,
+        doc2: null,
+        ...(fileCount > 2 ? { doc3: null } : {}),
+        locations: {
+            doc1: [],
+            doc2: [],
+            ...(fileCount > 2 ? { doc3: [] } : {}),
+        },
+    };
+}
+
+function buildPrompt(selectedFields: string[], fileCount: number): string {
+    const doc3Json = fileCount > 2 ? `,\n      "doc3": "value from document 3 or null"` : "";
+
+    return `Compare these ${fileCount} documents only by the selected fields below.
+
+Selected fields (strict list, preserve order exactly):
+${selectedFields.map((field, index) => `${index + 1}. ${field}`).join("\n")}
+
+Rules:
+1. Return JSON only.
+2. "fields" must contain exactly the selected fields above, in the same order.
+3. Do not add new fields. Do not rename fields.
+4. If a field is not found in a document, return null for that document.
+5. Set is_diff to true only when values differ across documents.
+
+Response schema:
+{
+  "summary": [
+    "short difference summary 1",
+    "short difference summary 2"
+  ],
+  "fields": [
+    {
+      "key": "${selectedFields[0] || "Field Name"}",
+      "is_diff": false,
+      "doc1": "value from document 1 or null",
+      "doc2": "value from document 2 or null"${doc3Json}
+    }
+  ]
+}`;
+}
 
 export async function POST(req: NextRequest) {
     let userId = "guest";
+
     try {
         const formData = await req.formData();
         userId = (formData.get("userId") as string) || "guest";
         const selectedModelId = (formData.get("selectedModelId") as string) || "";
-        
+
         const files: File[] = [];
         if (formData.has("file1")) files.push(formData.get("file1") as unknown as File);
         if (formData.has("file2")) files.push(formData.get("file2") as unknown as File);
         if (formData.has("file3")) files.push(formData.get("file3") as unknown as File);
 
         if (files.length < 2) {
-            return NextResponse.json({ error: "ต้องใช้เอกสารอย่างน้อย 2 ฉบับเพื่อเปรียบเทียบ" }, { status: 400 });
+            return NextResponse.json({ error: "At least 2 documents are required" }, { status: 400 });
         }
+
+        const selectedFieldsRaw = (formData.get("fields") as string | null) || "";
+        const selectedFields = parseSelectedFields(selectedFieldsRaw);
+        if (selectedFields.length === 0) {
+            return NextResponse.json({ error: "At least one comparison field is required" }, { status: 400 });
+        }
+
+        const fieldTypes: Record<string, string> = {};
+        const cleanSelectedFields = selectedFields.map(f => {
+            const match = f.match(/^(.*?)\s*\((.*?)\)$/);
+            if (match) {
+                const name = match[1].trim();
+                fieldTypes[normalizeFieldKey(name)] = match[2].trim().toLowerCase();
+                return name;
+            }
+            return f;
+        });
 
         const { env } = await getCloudflareContext();
         if (!env?.DB) {
             return NextResponse.json({ error: "Database not configured" }, { status: 500 });
         }
 
-        // 1. Check & Decrement Credits if not guest
         if (userId !== "guest") {
-            const userRes = await env.DB.prepare("SELECT credits_remaining, extra_credits, plan FROM users WHERE id = ?")
+            const userRes = await env.DB
+                .prepare("SELECT credits_remaining, extra_credits, plan FROM users WHERE id = ?")
                 .bind(userId)
                 .first<{ credits_remaining: number; extra_credits: number; plan: string }>();
 
             if (!userRes) {
-                return NextResponse.json({ error: "ไม่พบข้อมูลผู้ใช้" }, { status: 404 });
+                return NextResponse.json({ error: "User not found" }, { status: 404 });
             }
 
             const totalAvailable = userRes.credits_remaining + userRes.extra_credits;
             if (totalAvailable <= 0) {
-                return NextResponse.json({ error: "เครดิตหมดแล้ว กรุณาอัปเกรดแผนหรือซื้อเพิ่ม" }, { status: 403 });
+                return NextResponse.json({ error: "No credits remaining" }, { status: 403 });
             }
 
             if (userRes.credits_remaining > 0) {
@@ -46,163 +206,132 @@ export async function POST(req: NextRequest) {
             }
         }
 
-        // 2. Retrieve AI Configuration
-        let finalConfigs = await getActiveAIConfigs(env);
-
-        // Try to force a pro model if available for comparison because flash might struggle with bboxes and 2/3 images
-        let target = finalConfigs.find(c => c.id === selectedModelId);
-        if (!target) target = finalConfigs.find(c => c.model.includes('pro')) || finalConfigs[0];
+        const finalConfigs = await getActiveAIConfigs(env);
+        let target = finalConfigs.find((config) => config.id === selectedModelId);
+        if (!target) target = finalConfigs.find((config) => config.model.includes("pro")) || finalConfigs[0];
 
         if (!target) {
-            return NextResponse.json({ error: "No AI Configuration available" }, { status: 500 });
+            return NextResponse.json({ error: "No AI configuration available" }, { status: 500 });
         }
 
         const matchingKeys = finalConfigs
-            .filter(c => c.provider === target.provider && c.model === target.model)
-            .map(c => c.apiKey);
+            .filter((config) => config.provider === target.provider && config.model === target.model)
+            .map((config) => config.apiKey);
 
-        const fieldsToCompare = (formData.get("fields") as string) || "ประเภทเอกสาร, เลขที่เอกสาร, วันที่, ชื่อผู้ออก, ชื่อผู้รับ, เลขผู้เสียภาษี, เงื่อนไขชำระเงิน, กำหนดส่งสินค้า, ยอดรวม, ภาษี, ยอดสุทธิ, รายการสินค้า";
+        const prompt = buildPrompt(cleanSelectedFields, files.length);
 
-        // 3. Build Prompt and Execute
-        const prompt = `เปรียบเทียบเอกสาร ${files.length} ฉบับนี้และหาจุดที่แตกต่างกันอย่างละเอียด
-หน้าที่ของคุณคือ "สกัดข้อมูลจากเอกสารตามอ้างอิงหัวข้อต่อไปนี้: ${fieldsToCompare}" หรือสกัดหัวข้อสำคัญทั้งหมดที่พบ จากนั้นนำมาเทียบกัน "ทีละหัวข้อ"
-รูปแบบการตอบกลับต้องเป็น JSON เท่านั้น ดังนี้:
-{
-    "summary": [
-        "สรุปสิ่งที่แตกต่างจุดที่ 1",
-        "สรุปสิ่งที่แตกต่างจุดที่ 2"
-    ],
-    "fields": [
-        {
-            "key": "ชื่อหัวข้อ (เช่น วันที่, ยอดรวม, เงื่อนไขชำระเงิน)",
-            "is_diff": false,
-            "doc1": "ค่าของหัวข้อนี้ (จะเหมือนกันทุกฉบับ)",
-            "locations": {
-                "doc1": [{ "page": 1, "x": 0.1, "y": 0.2, "width": 0.3, "height": 0.05, "text": "ค่าของข้อความ" }],
-                "doc2": [{ "page": 1, "x": 0.1, "y": 0.2, "width": 0.3, "height": 0.05 }]
-                ${files.length > 2 ? ',"doc3": [{ "page": 1, "x": 0.1, "y": 0.2, "width": 0.3, "height": 0.05 }]' : ''}
-            }
-        },
-        {
-            "key": "ชื่อหัวข้อ (เช่น เงื่อนไขชำระเงิน)",
-            "is_diff": true,
-            "doc1": "ข้อมูลในฉบับที่ 1 (ถ้าไม่มีให้ใส่ null)",
-            "doc2": "ข้อมูลในฉบับที่ 2 (ถ้าไม่มีให้ใส่ null)"
-            ${files.length > 2 ? ',\n            "doc3": "ข้อมูลในฉบับที่ 3 (ถ้าไม่มีให้ใส่ null)"' : ''},
-            "locations": {
-                "doc1": [{ "page": 1, "x": 0.1, "y": 0.2, "width": 0.3, "height": 0.05 }],
-                "doc2": [{ "page": 1, "x": 0.1, "y": 0.25, "width": 0.3, "height": 0.05 }]
-                ${files.length > 2 ? ',"doc3": [{ "page": 1, "x": 0.1, "y": 0.25, "width": 0.3, "height": 0.05 }]' : ''}
-            }
-        }
-    ]
-}
-
-* กฎเหล็ก:
-1. เรียงลำดับ array "fields" ให้ครอบคลุมเนื้อหาสำคัญทั้งหมดของเอกสาร โดยเฉพาะหัวข้อที่มีความแตกต่างกัน
-2. หากหัวข้อไหนมีความแตกต่างกัน ให้ตั้ง is_diff เป็น true
-3. "locations" คือ กล่องพิกัด (Bounding Box) ของข้อความบนเอกสาร
-   - x, y คือพิกัด (0..1) ของมุมซ้ายบน
-   - width, height คือขนาดกว้างและสูง (0..1)
-   - page: หน้าของเอกสาร (เริ่มที่ 1) ถ้าเป็นเอกสารภาพให้ใช้ 1 เสมอ
-   - ตำแหน่ง highlight จะต้องตรงและครอบเฉพาะคำที่เกี่ยวข้องเท่านั้น อย่าครอบบล็อกใหญ่เกินจริง
-   - ถ้าหาตำแหน่งไม่พบ ให้ส่งเป็น array ว่าง ([]) ใน doc นั้น
-4. กรุณาตอบกลับแค่ JSON เพียวๆ ไม่มี markdown หรือ text อื่นนอกเหนือจากรูปแบบที่ระบุ`;
-
-        const imagesData = await Promise.all(files.map(async f => {
-            const arrayBuffer = await f.arrayBuffer();
-            const base64Data = Buffer.from(arrayBuffer).toString("base64");
-            return {
-                data: base64Data,
-                mimeType: f.type || "image/jpeg"
-            };
-        }));
+        const fileBuffers = await Promise.all(files.map(f => f.arrayBuffer()));
+        const imagesData = await Promise.all(
+            files.map(async (file, i) => {
+                const arrayBuffer = fileBuffers[i];
+                return {
+                    data: Buffer.from(arrayBuffer).toString("base64"),
+                    mimeType: file.type || "image/jpeg",
+                };
+            })
+        );
+        
+        // Extract real OCR positioning concurrently with AI call
+        const tokenExtractionsPromise = Promise.all(
+            files.map((file, i) => extractDocumentTokens(fileBuffers[i], file.type || "image/jpeg"))
+        );
 
         const startTime = Date.now();
-        const text = await generateWithAI({
-            provider: target.provider,
-            model: target.model,
-            prompt,
-            images: imagesData,
-            apiKeys: matchingKeys
-        });
-
+        const [text, documentTokens] = await Promise.all([
+            generateWithAI({
+                provider: target.provider,
+                model: target.model,
+                prompt,
+                images: imagesData,
+                apiKeys: matchingKeys,
+            }),
+            tokenExtractionsPromise
+        ]);
         const processingTimeMs = Date.now() - startTime;
 
-        let extracted: any = { summary: [], fields: [] };
+        const extracted: { summary: string[]; fields: CompareField[] } = { summary: [], fields: [] };
+        const fieldMap = new Map<string, CompareField>();
+
         try {
             const match = text.match(/\{[\s\S]*\}/);
-            if (match) {
-                extracted = JSON.parse(match[0]);
-                if (extracted.differences) {
-                    extracted.fields = extracted.differences;
-                    delete extracted.differences;
-                }
-                
-                // Sanitize locations
-                if (extracted.fields && Array.isArray(extracted.fields)) {
-                    const parseNum = (val: any, fallback: number): number => {
-                        if (typeof val === 'number') return val;
-                        if (typeof val === 'string') {
-                            const parsed = parseFloat(val);
-                            if (!isNaN(parsed)) return parsed;
-                        }
-                        return fallback;
-                    };
-
-                    extracted.fields.forEach((field: any) => {
-                        if (field.locations) {
-                            ['doc1', 'doc2', 'doc3'].forEach((docKey) => {
-                                if (field.locations[docKey] && Array.isArray(field.locations[docKey])) {
-                                    field.locations[docKey] = field.locations[docKey].map((loc: any) => {
-                                        let page = Math.max(1, Math.round(parseNum(loc.page, 1)));
-                                        let x = parseNum(loc.x, 0);
-                                        let y = parseNum(loc.y, 0);
-                                        let width = parseNum(loc.width, 0);
-                                        let height = parseNum(loc.height, 0);
-
-                                        let maxVal = Math.max(x, y, width, height);
-
-                                        // Auto-normalize if values look like scaled instead of 0..1
-                                        if (maxVal > 1) {
-                                            // Vision models often default to 0-1000 bounding boxes or 0-100 percentages
-                                            let scaleFactor = maxVal > 100 ? 1000 : 100;
-                                            x = x / scaleFactor;
-                                            y = y / scaleFactor;
-                                            width = width / scaleFactor;
-                                            height = height / scaleFactor;
-                                        }
-
-                                        // Clamp completely within 0..1
-                                        x = Math.max(0, Math.min(1, x));
-                                        y = Math.max(0, Math.min(1, y));
-                                        width = Math.max(0, Math.min(1, width));
-                                        height = Math.max(0, Math.min(1, height));
-                                        
-                                        // Ensure x + width doesn't overflow page
-                                        if (x + width > 1) width = 1 - x;
-                                        if (y + height > 1) height = 1 - y;
-
-                                        return { page, x, y, width, height, text: loc.text || "" };
-                                    });
-                                }
-                            });
-                        }
-                    });
-                }
+            if (!match) {
+                throw new Error("AI returned invalid format");
             }
-        } catch (e) {
-            return NextResponse.json({ error: "AI returned invalid format", raw: text }, { status: 502 });
+
+            const parsed = JSON.parse(match[0]);
+            const aiFields = Array.isArray(parsed?.fields)
+                ? parsed.fields
+                : Array.isArray(parsed?.differences)
+                    ? parsed.differences
+                    : [];
+
+            if (Array.isArray(parsed?.summary)) {
+                extracted.summary = parsed.summary.filter((item: unknown) => typeof item === "string");
+            }
+
+            for (const field of aiFields) {
+                const normalizedKey = normalizeFieldKey(field?.key);
+                // Also search in original selected fields if they didn't match cleanly
+                const selectedKey = cleanSelectedFields.find((item) => normalizeFieldKey(item) === normalizedKey) 
+                                 || selectedFields.find((item) => normalizeFieldKey(item) === normalizedKey);
+                if (!selectedKey) continue;
+                
+                const isTableField = fieldTypes[normalizedKey] === "table";
+                
+                // Match text to OCR tokens
+                const locs: any = { doc1: [], doc2: [], doc3: [] };
+                
+                if (field?.doc1 && documentTokens[0]) {
+                    const counterpart = field.doc2 || field.doc3 || undefined;
+                    const matchedTokens = matchValueToTokens(String(field.doc1), documentTokens[0], isTableField, String(counterpart || ""));
+                    locs.doc1 = mergeTokenBoxes(matchedTokens);
+                }
+                if (field?.doc2 && documentTokens[1]) {
+                    const counterpart = field.doc1 || field.doc3 || undefined;
+                    const matchedTokens = matchValueToTokens(String(field.doc2), documentTokens[1], isTableField, String(counterpart || ""));
+                    locs.doc2 = mergeTokenBoxes(matchedTokens);
+                }
+                if (field?.doc3 && documentTokens[2]) {
+                    const counterpart = field.doc1 || field.doc2 || undefined;
+                    const matchedTokens = matchValueToTokens(String(field.doc3), documentTokens[2], isTableField, String(counterpart || ""));
+                    locs.doc3 = mergeTokenBoxes(matchedTokens);
+                }
+
+                fieldMap.set(selectedKey, {
+                    key: selectedKey,
+                    is_diff: Boolean(field?.is_diff),
+                    doc1: field?.doc1 ?? null,
+                    doc2: field?.doc2 ?? null,
+                    ...(files.length > 2 ? { doc3: field?.doc3 ?? null } : {}),
+                    locations: sanitizeLocations(locs),
+                });
+            }
+        } catch (error: any) {
+            return NextResponse.json({ error: error.message || "AI returned invalid format", raw: text }, { status: 502 });
         }
 
-        await logSystemEvent(env, "DOCUMENT_COMPARE", `Compared ${files.length} documents.`, "info", userId);
+        extracted.fields = cleanSelectedFields.map((fieldKey) => {
+            const existing = fieldMap.get(fieldKey) || fieldMap.get(selectedFields[cleanSelectedFields.indexOf(fieldKey)]) || createEmptyField(fieldKey, files.length);
+            const values = [existing.doc1, existing.doc2, files.length > 2 ? existing.doc3 : undefined]
+                .filter((value) => value !== undefined);
+            const nonNullValues = values.filter((value) => value !== null);
+            const isDiff = nonNullValues.length > 1 && new Set(nonNullValues).size > 1;
+
+            return {
+                ...createEmptyField(fieldKey, files.length),
+                ...existing,
+                key: fieldKey,
+                is_diff: existing.is_diff || isDiff,
+            };
+        });
+
+        await logSystemEvent(env, "DOCUMENT_COMPARE", `Compared ${files.length} documents with ${selectedFields.length} selected fields.`, "info", userId);
 
         return NextResponse.json({
             success: true,
             processing_time_ms: processingTimeMs,
-            extracted_data: extracted
+            extracted_data: extracted,
         });
-
     } catch (error: any) {
         console.error("[Compare POST] error:", error);
         const { env } = await getCloudflareContext();

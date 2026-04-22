@@ -38,3 +38,12 @@ export interface UsageStats {
     avgSpeedMs?: number;
     avgConfidence?: number;
 }
+
+export interface OCRToken {
+    text: string;
+    page: number; // 1-indexed
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+}
