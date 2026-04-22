@@ -12,6 +12,7 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
 ).toString();
 
 // ─── Shared Types ──────────────────────────────────
+import { extractTokensOnFrontend } from "@/lib/frontend-ocr";
 interface ExtractField { id: string; name: string; type: "text" | "number" | "currency" | "date" | "address" | "email" | "table"; }
 interface Template { id: string; name: string; fields_json: string; user_id?: string; }
 
@@ -313,8 +314,12 @@ export default function CompareWorkspace({ user }: Props) {
         const stringifiedFields = extractFields.map(f => f.type !== "text" ? `${f.name} (${f.type})` : f.name).join(", ");
         if (stringifiedFields) formData.append("fields", stringifiedFields);
 
+        const tokenPromises = validFiles.map(file => extractTokensOnFrontend(file));
+        const allTokens = await Promise.all(tokenPromises);
+
         validFiles.forEach((file, idx) => {
             formData.append(`file${idx + 1}`, file);
+            formData.append(`docTokens${idx + 1}`, JSON.stringify(allTokens[idx]));
         });
 
         try {

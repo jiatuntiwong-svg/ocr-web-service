@@ -231,10 +231,17 @@ export async function POST(req: NextRequest) {
             })
         );
         
-        // Extract real OCR positioning sequentially to avoid Out-Of-Memory (OOM) in Cloudflare Worker
+        // Read OCR tokens provided by frontend to avoid OOM or API mismatch on Edge
         const documentTokens: OCRToken[][] = [];
         for (let i = 0; i < files.length; i++) {
-            documentTokens.push(await extractDocumentTokens(fileBuffers[i], files[i].type || "image/jpeg"));
+            const rawTokens = formData.get(`docTokens${i + 1}`);
+            let tokens = [];
+            if (typeof rawTokens === "string") {
+                try {
+                    tokens = JSON.parse(rawTokens);
+                } catch { } // fallback to empty
+            }
+            documentTokens.push(tokens);
         }
 
         const startTime = Date.now();
