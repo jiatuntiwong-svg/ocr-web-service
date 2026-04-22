@@ -1,4 +1,4 @@
-import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
+// Removed top-level import of pdfjs-dist to prevent Edge worker module evaluation crash
 import { OCRToken } from "./types";
 // tesseract.js and image-size are optional – loaded dynamically so esbuild
 // never bundles their native .node binaries into the Cloudflare Worker.
@@ -8,10 +8,13 @@ import { OCRToken } from "./types";
 
 async function extractPdfTokens(fileBuffer: ArrayBuffer): Promise<OCRToken[]> {
     const tokens: OCRToken[] = [];
-    const loadingTask = getDocument({ data: new Uint8Array(fileBuffer), disableWorker: true } as any);
-    const pdf = await loadingTask.promise;
+    try {
+        const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+        const getDocument = pdfjs.getDocument;
+        const loadingTask = getDocument({ data: new Uint8Array(fileBuffer), disableWorker: true } as any);
+        const pdf = await loadingTask.promise;
 
-    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+        for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
         const page = await pdf.getPage(pageNum);
         const textContent = await page.getTextContent();
         const viewport = page.getViewport({ scale: 1.0 });
@@ -40,6 +43,10 @@ async function extractPdfTokens(fileBuffer: ArrayBuffer): Promise<OCRToken[]> {
         }
     }
     return tokens;
+    } catch (error) {
+        console.error("PDF.js module evaluation or parsing failed:", error);
+        throw error; // Rethrow to let the fallback mechanism take over
+    }
 }
 
 export async function extractDocumentTokens(
@@ -64,6 +71,9 @@ export async function extractDocumentTokens(
             // eslint-disable-next-line @typescript-eslint/no-var-requires
             const { default: Tesseract } = require("tesseract.js");
 
+            // Load pdf.js dynamically to avoid top-level crash on edge
+            const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+            const getDocument = pdfjs.getDocument;
             const loadingTask = getDocument({ data: new Uint8Array(fileBuffer), disableWorker: true } as any);
             const pdf = await loadingTask.promise;
             const worker = await Tesseract.createWorker("tha+eng");
