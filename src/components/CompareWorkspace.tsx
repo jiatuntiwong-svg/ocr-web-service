@@ -69,11 +69,36 @@ const TYPE_ICONS: Record<string, React.ReactNode> = {
 };
 
 
+// Helper to compute exact rendered rect of an image ignoring letterbox
+function getImageRenderedRect(el: HTMLImageElement) {
+    const { naturalWidth, naturalHeight, width, height } = el;
+    const containerAspect = width / height;
+    const imageAspect = naturalWidth / naturalHeight;
+
+    let renderedW: number, renderedH: number, offsetX: number, offsetY: number;
+
+    if (imageAspect > containerAspect) {
+        renderedW = width;
+        renderedH = width / imageAspect;
+        offsetX = 0;
+        offsetY = (height - renderedH) / 2;
+    } else {
+        renderedH = height;
+        renderedW = height * imageAspect;
+        offsetX = (width - renderedW) / 2;
+        offsetY = 0;
+    }
+
+    return { renderedW, renderedH, offsetX, offsetY };
+}
+
 // ─── Preview Component ────────────────────────────────────────────────────────
 const DocumentPreviewWithHighlights = ({ file, url, idx, highlights = [], selectedFieldKey }: any) => {
     const [numPages, setNumPages] = useState<number>();
     const [pageNumber, setPageNumber] = useState<number>(1);
     const containerRef = useRef<HTMLDivElement>(null);
+    const imgRef = useRef<HTMLImageElement>(null);
+    const [imageRects, setImageRects] = useState<React.CSSProperties[]>([]);
 
     const activeHighlights = highlights
         .filter((h: any) => !selectedFieldKey || h.key === selectedFieldKey)
@@ -90,9 +115,43 @@ const DocumentPreviewWithHighlights = ({ file, url, idx, highlights = [], select
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selectedFieldKey, highlights]);
 
+    // Recalculate pixel coordinates for images
+    const recalculateImageHighlights = React.useCallback(() => {
+        if (!imgRef.current || file?.type === "application/pdf") return;
+        const el = imgRef.current;
+        if (!el.naturalWidth) return;
+
+        const { renderedW, renderedH, offsetX, offsetY } = getImageRenderedRect(el);
+
+        const rects = activeHighlights.map((box: any) => ({
+            position: 'absolute' as const,
+            left: offsetX + box.x * renderedW + "px",
+            top: offsetY + box.y * renderedH + "px",
+            width: box.width * renderedW + "px",
+            height: box.height * renderedH + "px",
+            border: '2px solid rgba(59, 130, 246, 0.9)',
+            backgroundColor: 'rgba(59, 130, 246, 0.2)',
+            boxShadow: '0 0 8px rgba(59,130,246,0.5)',
+            pointerEvents: 'none' as const,
+            transition: 'all 0.15s ease',
+            zIndex: 20
+        }));
+        setImageRects(rects);
+    }, [activeHighlights, file?.type]);
+
+    useEffect(() => {
+        recalculateImageHighlights();
+        const container = containerRef.current;
+        if (!container || file?.type === "application/pdf") return;
+        
+        const ro = new ResizeObserver(() => recalculateImageHighlights());
+        ro.observe(container);
+        return () => ro.disconnect();
+    }, [recalculateImageHighlights, file?.type]);
+
     if (!file) return null;
 
-    const renderHighlightBox = (box: any, i: number) => (
+    const renderPdfHighlightBox = (box: any, i: number) => (
         <div
             key={i}
             className="absolute border-2 border-blue-500 bg-blue-500/20 shadow-[0_0_8px_rgba(59,130,246,0.6)] z-20 pointer-events-none transition-all duration-300 animate-in fade-in zoom-in-95"
@@ -122,7 +181,7 @@ const DocumentPreviewWithHighlights = ({ file, url, idx, highlights = [], select
                         >
                             {activeHighlights
                                 .filter((h: any) => h.page === pageNumber)
-                                .map(renderHighlightBox)}
+                                .map(renderPdfHighlightBox)}
                         </Page>
                     </Document>
                     {numPages && numPages > 1 && (
@@ -134,9 +193,11 @@ const DocumentPreviewWithHighlights = ({ file, url, idx, highlights = [], select
                     )}
                 </div>
             ) : (
-                <div className="relative inline-block">
-                    <img src={url} alt={"Doc " + (idx + 1)} className="max-w-full h-auto pointer-events-none rounded-sm border border-slate-200 dark:border-slate-800 shadow-md block" />
-                    {activeHighlights.map(renderHighlightBox)}
+                <div className="relative inline-block w-full h-full flex items-center justify-center">
+                    <img ref={imgRef} src={url} alt={"Doc " + (idx + 1)} onLoad={recalculateImageHighlights} className="max-w-full max-h-[80vh] h-auto object-contain pointer-events-none rounded-sm border border-slate-200 dark:border-slate-800 shadow-md block relative" />
+                    {imageRects.map((style, i) => (
+                        <div key={i} style={style} />
+                    ))}
                 </div>
             )}
         </div>

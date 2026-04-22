@@ -117,10 +117,16 @@ export async function extractTokensOnFrontend(file: File): Promise<OCRToken[]> {
             const img = new Image();
             img.src = dataUrl;
             await new Promise((resolve) => { img.onload = resolve; });
-            const width = img.width || 1;
-            const height = img.height || 1;
+            const width = img.naturalWidth || 1;
+            const height = img.naturalHeight || 1;
 
-            const { data } = await worker.recognize(dataUrl);
+            const canvas = document.createElement("canvas");
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext("2d");
+            if (ctx) ctx.drawImage(img, 0, 0, width, height);
+
+            const { data } = await worker.recognize(canvas);
             await worker.terminate();
             URL.revokeObjectURL(dataUrl);
 
