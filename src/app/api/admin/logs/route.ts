@@ -1,26 +1,42 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from "next/server";
+import { getCloudflareContext } from "@opennextjs/cloudflare";
 
-export const runtime = 'edge';
+export const runtime = "edge";
 
-export async function GET(req: Request) {
+function getSessionUser(req: NextRequest): { id?: string; role?: string } | null {
+    const token = req.cookies.get("session")?.value;
+    if (!token) return null;
+
     try {
-        const { searchParams } = new URL(req.url);
-        const userId = searchParams.get('userId');
+        const json = decodeURIComponent(escape(atob(token)));
+        return JSON.parse(json) as { id?: string; role?: string };
+    } catch {
+        return null;
+    }
+}
 
-        if (!userId) {
-            return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+async function getCFEnv() {
+    try {
+        const { env } = await getCloudflareContext();
+        return env?.DB ? env : null;
+    } catch {
+        return null;
+    }
+}
+
+export async function GET(req: NextRequest) {
+    const caller = getSessionUser(req);
+    if (caller?.role !== "admin") {
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+
+    try {
+        const env = await getCFEnv();
+        if (!env) {
+            return NextResponse.json({ success: true, logs: [], warning: "Cloudflare DB context unavailable" });
         }
 
-        const db = (process.env as any).DB;
-
-        // Verify admin role
-        const userCheck = await db.prepare("SELECT role FROM users WHERE id = ?").bind(userId).first();
-        if (!userCheck || userCheck.role !== 'admin') {
-            return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-        }
-
-        // Auto-create table if it doesn't exist
-        await db.prepare(`
+        await env.DB.prepare(`
             CREATE TABLE IF NOT EXISTS system_logs (
                 id TEXT PRIMARY KEY,
                 user_id TEXT,
@@ -31,8 +47,8 @@ export async function GET(req: Request) {
             )
         `).run();
 
-        const { results } = await db.prepare(`
-            SELECT l.*, u.email as user_email, u.name as user_name
+        const { results } = await env.DB.prepare(`
+            SELECT l.*, u.email AS user_email, u.name AS user_name
             FROM system_logs l
             LEFT JOIN users u ON l.user_id = u.id
             ORDER BY l.created_at DESC
@@ -40,9 +56,8 @@ export async function GET(req: Request) {
         `).all();
 
         return NextResponse.json({ success: true, logs: results || [] });
-
     } catch (error: any) {
-        console.error("Fetch Logs Error:", error);
-        return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+        console.error("[Admin Logs GET]", error);
+        return NextResponse.json({ success: false, error: error.message || "Failed to fetch logs" }, { status: 500 });
     }
 }
