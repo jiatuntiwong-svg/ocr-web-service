@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import Stripe from "stripe";
+import { loadTierCredits, creditForPlan } from "@/lib/tier-config";
+import { broadcastToAdmins } from "@/lib/notifications";
 
 
 export async function POST(request: NextRequest) {
@@ -40,8 +42,9 @@ export async function POST(request: NextRequest) {
                 }
 
                 if (type === "subscription") {
-                    const lowPlan = plan.toLowerCase();
-                    const credits = lowPlan === "pro" ? 1000 : lowPlan === "enterprise" ? 999999 : 500;
+                    // Stamp the new plan's configured credit (admin-editable).
+                    const tierCredits = await loadTierCredits(env);
+                    const credits = creditForPlan(tierCredits, plan);
                     console.log(`🆙 Updating user ${userId} to ${plan} (${credits} credits)`);
 
                     // Ensure user exists in DB (especially for dev users)
@@ -74,15 +77,27 @@ export async function POST(request: NextRequest) {
                 ).run();
                 console.log("📄 Transaction logged");
 
+                await broadcastToAdmins(env, {
+                    kind: "payment",
+                    severity: "info",
+                    title: type === "topup" ? "Top-up purchased" : "Subscription started",
+                    body: `${session.customer_details?.email || userId} — ${plan} (${session.amount_total ? (session.amount_total / 100).toFixed(2) : 0} ${session.currency?.toUpperCase() || ""})`,
+                    link: "/admin_users",
+                    metadata: { userId, plan, type, amount: session.amount_total },
+                });
+
                 break;
             }
 
             case "customer.subscription.deleted": {
                 const sub = event.data.object as Stripe.Subscription;
                 console.log("❌ Sub Canceled:", sub.id);
+                // Downgrade to Free → re-stamp with the configured Free credit.
+                const tierCredits = await loadTierCredits(env);
+                const freeCredit = creditForPlan(tierCredits, "free");
                 await db.prepare(
-                    "UPDATE users SET plan = 'Free', subscription_status = 'canceled', credits_total = 10 WHERE subscription_id = ?"
-                ).bind(sub.id).run();
+                    "UPDATE users SET plan = 'Free', subscription_status = 'canceled', credits_total = ? WHERE subscription_id = ?"
+                ).bind(freeCredit, sub.id).run();
                 break;
             }
         }

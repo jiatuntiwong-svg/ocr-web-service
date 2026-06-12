@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { PLAN_LIMITS } from "@/lib/devUsers";
+import { loadFeatureFlags, resolveFeatures } from "@/lib/tier-config";
+import { fail, ErrorCode } from "@/lib/apiResponse";
 
 
 const getPlanLimit = (plan?: string) => PLAN_LIMITS[plan?.toLowerCase() ?? ""] ?? 50;
@@ -12,7 +14,7 @@ export async function GET(req: NextRequest) {
         const plan = searchParams.get("plan") || "Free";
 
         if (!userId) {
-            return NextResponse.json({ error: "Missing userId" }, { status: 400 });
+            return fail(ErrorCode.MISSING_FIELDS, { context: "stats" });
         }
 
         const { env } = await getCloudflareContext();
@@ -20,8 +22,10 @@ export async function GET(req: NextRequest) {
         let customLimit: number | null = null;
         let dbPlan = plan;
         let creditsRemaining = 0;
+        let creditsTotal: number | null = null;
         let recentDocs: any[] = [];
         let weeklyStats: any[] = [];
+        let weeklyCompareStats: any[] = [];
         let avgSpeedMs = 0;
         let avgConfidence = 0;
         const confidenceCount = 0;
@@ -29,18 +33,21 @@ export async function GET(req: NextRequest) {
         if (env?.DB) {
             // Fetch fresh user data (plan and credits)
             const userRow = await env.DB
-                .prepare("SELECT plan, credits_remaining, extra_credits FROM users WHERE id = ?")
+                .prepare("SELECT plan, credits_remaining, extra_credits, credits_total FROM users WHERE id = ?")
                 .bind(userId)
-                .first<{ plan: string; credits_remaining: number; extra_credits: number }>();
+                .first<{ plan: string; credits_remaining: number; extra_credits: number; credits_total: number }>();
 
             if (userRow) {
                 dbPlan = userRow.plan;
                 creditsRemaining = userRow.credits_remaining + userRow.extra_credits;
+                if (userRow.credits_total != null) creditsTotal = Number(userRow.credits_total);
             }
 
-            // Count total documents
+            // Count total documents (OCR only — compare runs are excluded
+            // from the "Docs Processed" KPI; they still appear in Recent
+            // Activity below).
             const countRow = await env.DB
-                .prepare("SELECT COUNT(*) as count FROM documents WHERE user_id = ?")
+                .prepare("SELECT COUNT(*) as count FROM documents WHERE user_id = ? AND COALESCE(type,'ocr') = 'ocr'")
                 .bind(userId)
                 .first();
             totalDocs = (countRow?.count as number) || 0;
@@ -61,7 +68,7 @@ export async function GET(req: NextRequest) {
             // Fetch recent 5 documents
             try {
                 const { results } = await env.DB
-                    .prepare("SELECT id, file_name as name, status, created_at, raw_json FROM documents WHERE user_id = ? ORDER BY created_at DESC LIMIT 5")
+                    .prepare("SELECT id, file_name as name, status, created_at, raw_json, COALESCE(type,'ocr') as type FROM documents WHERE user_id = ? ORDER BY created_at DESC LIMIT 5")
                     .bind(userId)
                     .all();
                 recentDocs = results || [];
@@ -69,13 +76,14 @@ export async function GET(req: NextRequest) {
                 console.error("Error fetching recent docs:", err);
             }
 
-            // Fetch weekly data (last 7 days grouped by date)
+            // Fetch weekly data (last 7 days grouped by date) — OCR + Compare
+            // both queried so the chart can render grouped bars.
             try {
                 const { results } = await env.DB
                     .prepare(`
-                        SELECT date(created_at) as date, COUNT(*) as count 
-                        FROM documents 
-                        WHERE user_id = ? AND created_at >= date('now', '-6 days')
+                        SELECT date(created_at) as date, COUNT(*) as count
+                        FROM documents
+                        WHERE user_id = ? AND COALESCE(type,'ocr') = 'ocr' AND created_at >= date('now', '-6 days')
                         GROUP BY date(created_at)
                         ORDER BY date ASC
                     `)
@@ -85,18 +93,33 @@ export async function GET(req: NextRequest) {
             } catch (err) {
                 console.error("Error fetching weekly data:", err);
             }
+            try {
+                const { results } = await env.DB
+                    .prepare(`
+                        SELECT date(created_at) as date, COUNT(*) as count
+                        FROM documents
+                        WHERE user_id = ? AND type = 'compare' AND created_at >= date('now', '-6 days')
+                        GROUP BY date(created_at)
+                        ORDER BY date ASC
+                    `)
+                    .bind(userId)
+                    .all();
+                weeklyCompareStats = results || [];
+            } catch (err) {
+                console.error("Error fetching weekly compare data:", err);
+            }
 
             // Fetch average processing time
             try {
                 const avgRow = await env.DB
-                    .prepare("SELECT AVG(processing_time_ms) as avg_speed FROM documents WHERE user_id = ? AND status = 'completed'")
+                    .prepare("SELECT AVG(processing_time_ms) as avg_speed FROM documents WHERE user_id = ? AND status = 'completed' AND COALESCE(type,'ocr') = 'ocr'")
                     .bind(userId)
                     .first();
                 avgSpeedMs = Number(avgRow?.avg_speed) || 0;
 
                 // Dynamic Confidence calculation
                 const { results: allDocs } = await env.DB
-                    .prepare("SELECT raw_json FROM documents WHERE user_id = ? AND status = 'completed' AND raw_json IS NOT NULL")
+                    .prepare("SELECT raw_json FROM documents WHERE user_id = ? AND status = 'completed' AND raw_json IS NOT NULL AND COALESCE(type,'ocr') = 'ocr'")
                     .bind(userId)
                     .all<{ raw_json: string }>();
 
@@ -126,7 +149,10 @@ export async function GET(req: NextRequest) {
             }
         }
 
-        const baseLimit = getPlanLimit(dbPlan);
+        // The plan limit is each user's OWN credits_total — stamped at sign-up
+        // from the per-tier config (see lib/tier-config.ts). Falls back to the
+        // static plan limit only when no DB row exists (dev mode).
+        const baseLimit = creditsTotal != null ? creditsTotal : getPlanLimit(dbPlan);
         const effectiveLimit = customLimit !== null ? customLimit : baseLimit;
 
         let refinedLimit = effectiveLimit;
@@ -154,16 +180,26 @@ export async function GET(req: NextRequest) {
                 weeklyDataArray[6 - i] = Number(found.count) || 0;
             }
         }
+        // Compare counts aligned to the same 7-day window.
+        const weeklyCompareDataArray = [0, 0, 0, 0, 0, 0, 0];
+        for (let i = 6; i >= 0; i--) {
+            const d = new Date(today);
+            d.setDate(d.getDate() - i);
+            const dateStr = d.toISOString().split('T')[0];
+            const found = weeklyCompareStats.find(stat => stat.date === dateStr);
+            if (found) weeklyCompareDataArray[6 - i] = Number(found.count) || 0;
+        }
 
-        // Fetch monthly data
+        // Fetch monthly data — OCR + Compare separately for grouped bar chart.
         let monthlyStats: any[] = [];
+        let monthlyCompareStats: any[] = [];
         try {
             if (env?.DB) {
                 const { results } = await env.DB
                     .prepare(`
-                        SELECT strftime('%Y-%m', created_at) as month, COUNT(*) as count 
-                        FROM documents 
-                        WHERE user_id = ? AND created_at >= date('now', '-5 months')
+                        SELECT strftime('%Y-%m', created_at) as month, COUNT(*) as count
+                        FROM documents
+                        WHERE user_id = ? AND COALESCE(type,'ocr') = 'ocr' AND created_at >= date('now', '-5 months')
                         GROUP BY strftime('%Y-%m', created_at)
                         ORDER BY month ASC
                     `)
@@ -173,6 +209,23 @@ export async function GET(req: NextRequest) {
             }
         } catch (err) {
             console.error("Error fetching monthly data:", err);
+        }
+        try {
+            if (env?.DB) {
+                const { results } = await env.DB
+                    .prepare(`
+                        SELECT strftime('%Y-%m', created_at) as month, COUNT(*) as count
+                        FROM documents
+                        WHERE user_id = ? AND type = 'compare' AND created_at >= date('now', '-5 months')
+                        GROUP BY strftime('%Y-%m', created_at)
+                        ORDER BY month ASC
+                    `)
+                    .bind(userId)
+                    .all();
+                monthlyCompareStats = results || [];
+            }
+        } catch (err) {
+            console.error("Error fetching monthly compare data:", err);
         }
 
         const monthlyDataArray = [0, 0, 0, 0, 0, 0];
@@ -188,6 +241,13 @@ export async function GET(req: NextRequest) {
                 monthlyDataArray[5 - i] = Number(found.count) || 0;
             }
         }
+        const monthlyCompareDataArray = [0, 0, 0, 0, 0, 0];
+        for (let i = 5; i >= 0; i--) {
+            const d = new Date(today.getFullYear(), today.getMonth() - i, 1);
+            const monthStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+            const found = monthlyCompareStats.find(stat => stat.month === monthStr);
+            if (found) monthlyCompareDataArray[5 - i] = Number(found.count) || 0;
+        }
 
         // Fetch yearly data
         let yearlyStats: any[] = [];
@@ -195,9 +255,9 @@ export async function GET(req: NextRequest) {
             if (env?.DB) {
                 const { results } = await env.DB
                     .prepare(`
-                        SELECT strftime('%Y', created_at) as year, COUNT(*) as count 
-                        FROM documents 
-                        WHERE user_id = ? AND created_at >= date('now', '-4 years')
+                        SELECT strftime('%Y', created_at) as year, COUNT(*) as count
+                        FROM documents
+                        WHERE user_id = ? AND COALESCE(type,'ocr') = 'ocr' AND created_at >= date('now', '-4 years')
                         GROUP BY strftime('%Y', created_at)
                         ORDER BY year ASC
                     `)
@@ -221,9 +281,53 @@ export async function GET(req: NextRequest) {
             }
         }
 
+        // Per-function AI usage breakdown (OCR / Compare / Public API) from
+        // the ai_usage log. Wrapped in try/catch — the table may not exist
+        // until the first AI call after the token-tracking feature shipped.
+        // Note: token counts are intentionally NOT exposed here — the user
+        // dashboard shows only call counts. Token/cost data is admin-only
+        // (see /api/admin/ai-usage).
+        const emptyFn = () => ({ calls: 0, monthCalls: 0 });
+        const functionUsage: Record<string, ReturnType<typeof emptyFn>> = {
+            ocr: emptyFn(), compare: emptyFn(), api_extract: emptyFn(),
+        };
+        try {
+            if (env?.DB) {
+                const allRes = await env.DB.prepare(`
+                    SELECT function AS fn, COUNT(*) AS calls
+                    FROM ai_usage WHERE user_id = ? GROUP BY function
+                `).bind(userId).all();
+                for (const r of (allRes.results || []) as any[]) {
+                    const f = functionUsage[r.fn];
+                    if (f) f.calls = Number(r.calls) || 0;
+                }
+                const monRes = await env.DB.prepare(`
+                    SELECT function AS fn, COUNT(*) AS calls
+                    FROM ai_usage
+                    WHERE user_id = ? AND strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now')
+                    GROUP BY function
+                `).bind(userId).all();
+                for (const r of (monRes.results || []) as any[]) {
+                    const f = functionUsage[r.fn];
+                    if (f) f.monthCalls = Number(r.calls) || 0;
+                }
+            }
+        } catch (err) {
+            console.error("Error fetching ai_usage breakdown:", err);
+        }
+
+        // Resolved feature flags for this user's tier — drives client-side
+        // nav/menu gating (the backend routes enforce independently).
+        let features = { ocr: true, compare: true, public_api: true };
+        try {
+            if (env?.DB) features = resolveFeatures(await loadFeatureFlags(env), dbPlan);
+        } catch { /* default all-on */ }
+
         return NextResponse.json({
             totalDocs,
             limit: refinedLimit,
+            functionUsage,
+            features,
             creditsRemaining: refinedLimit >= 999999 ? 999999 : creditsRemaining,
             recentActivity: recentDocs.map(doc => {
                 let parsedJson = null;
@@ -240,13 +344,16 @@ export async function GET(req: NextRequest) {
                     confidence: doc.status === 'completed' ? 95 : 0,
                     template: "Auto",
                     pages: 1,
+                    type: (doc.type as string) || "ocr",
                     data_extracted: parsedJson
                 };
             }),
             weeklyData: weeklyDataArray,
             weekLabels: weekLabels,
+            weeklyCompareData: weeklyCompareDataArray,
             monthlyData: monthlyDataArray,
             monthLabels: monthLabels,
+            monthlyCompareData: monthlyCompareDataArray,
             yearlyData: yearlyDataArray,
             yearLabels: yearLabels,
             avgSpeedMs: avgSpeedMs,
@@ -254,6 +361,6 @@ export async function GET(req: NextRequest) {
         });
     } catch (err: any) {
         console.error("[Stats GET] error:", err);
-        return NextResponse.json({ error: err.message }, { status: 500 });
+        return fail(ErrorCode.SERVER_ERROR, { detail: err, context: "stats" });
     }
 }

@@ -1,28 +1,27 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
-
+import { ok, fail, ErrorCode } from "@/lib/apiResponse";
 
 export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const id = searchParams.get("id");
 
     if (!id) {
-        return NextResponse.json({ error: "Missing document ID" }, { status: 400 });
+        return fail(ErrorCode.MISSING_FIELDS, { context: "status" });
     }
 
     try {
         const { env } = await getCloudflareContext();
         if (!env || !env.DB) {
-            throw new Error("Database binding not found");
+            return fail(ErrorCode.SERVER_ERROR, { detail: "no DB binding", context: "status" });
         }
 
-        // ดึงสถานะปัจจุบันจากฐานข้อมูล
         const doc = await env.DB.prepare("SELECT status, raw_json FROM documents WHERE id = ?")
             .bind(id)
             .first<{ status: string; raw_json: string }>();
 
         if (!doc) {
-            return NextResponse.json({ error: "Document not found" }, { status: 404 });
+            return fail(ErrorCode.NOT_FOUND, { context: "status" });
         }
 
         let data = null;
@@ -40,13 +39,8 @@ export async function GET(request: NextRequest) {
             }
         }
 
-        return NextResponse.json({
-            success: true,
-            status: doc.status,
-            data: data
-        });
-
+        return ok({ success: true, status: doc.status, data });
     } catch (error: any) {
-        return NextResponse.json({ error: error.message }, { status: 500 });
+        return fail(ErrorCode.SERVER_ERROR, { detail: error, context: "status" });
     }
 }

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { fail, ErrorCode } from "@/lib/apiResponse";
 
 
 export interface AIConfig {
@@ -24,7 +25,7 @@ export async function GET(req: NextRequest) {
         }
     }
 
-    if (caller?.role !== "admin") return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    if (caller?.role !== "admin") return fail(ErrorCode.UNAUTHORIZED, { context: "admin-settings" });
 
     try {
         const { env } = await getCloudflareContext();
@@ -65,7 +66,7 @@ export async function GET(req: NextRequest) {
 
         return NextResponse.json({ configs: masked });
     } catch (err: any) {
-        return NextResponse.json({ error: err.message }, { status: 500 });
+        return fail(ErrorCode.SERVER_ERROR, { detail: err, context: "admin-settings" });
     }
 }
 
@@ -81,7 +82,7 @@ export async function POST(req: NextRequest) {
         }
     }
 
-    if (caller?.role !== "admin") return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    if (caller?.role !== "admin") return fail(ErrorCode.UNAUTHORIZED, { context: "admin-settings" });
 
     try {
         const { action, config } = await req.json() as { action: 'add' | 'remove' | 'update' | 'toggle', config: AIConfig };
@@ -153,6 +154,6 @@ export async function POST(req: NextRequest) {
 
         return NextResponse.json({ success: true });
     } catch (err: any) {
-        return NextResponse.json({ error: err.message }, { status: 500 });
+        return fail(ErrorCode.SERVER_ERROR, { detail: err, context: "admin-settings" });
     }
 }

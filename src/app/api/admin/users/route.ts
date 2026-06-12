@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { DEV_USERS, PLAN_LIMITS } from "@/lib/devUsers";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { fail, ErrorCode } from "@/lib/apiResponse";
+import { hashPassword } from "@/lib/passwordHash";
 
 
 // ── Verify caller is admin by reading their session cookie ──────────────────
@@ -40,8 +42,12 @@ async function safeGetCustomLimit(db: any, userId: string): Promise<number | nul
 }
 
 // ── Build enriched user row ──────────────────────────────────────────────────
-function buildRow(u: { id: string; name: string; email: string; role: string; plan: string; credits_remaining?: number; extra_credits?: number }, totalDocs: number, customLimit: number | null) {
-    const baseLimit = PLAN_LIMITS[u.plan?.toLowerCase()] ?? 50;
+function buildRow(u: { id: string; name: string; email: string; role: string; plan: string; credits_remaining?: number; extra_credits?: number; credits_total?: number }, totalDocs: number, customLimit: number | null) {
+    // Plan limit = the user's OWN credits_total (stamped at sign-up). Falls
+    // back to the static plan limit only for dev users with no DB row.
+    const baseLimit = (u.credits_total != null)
+        ? Number(u.credits_total)
+        : (PLAN_LIMITS[u.plan?.toLowerCase()] ?? 50);
     const effectiveLimit = customLimit !== null ? customLimit : baseLimit;
 
     // Use stored credits if available, otherwise fallback to calculated docs-based limit
@@ -65,7 +71,7 @@ function buildRow(u: { id: string; name: string; email: string; role: string; pl
 export async function GET(req: NextRequest) {
     const caller = getSessionUser(req);
     if (caller?.role !== "admin") {
-        return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+        return fail(ErrorCode.UNAUTHORIZED, { context: "admin-users" });
     }
 
     try {
@@ -79,8 +85,8 @@ export async function GET(req: NextRequest) {
 
         // ── Production: fetch from D1 ────────────────────────────────────────
         const usersResult = await env.DB
-            .prepare("SELECT id, name, email, role, plan, credits_remaining, extra_credits FROM users ORDER BY created_at DESC")
-            .all<{ id: string; name: string; email: string; role: string; plan: string; credits_remaining: number; extra_credits: number }>();
+            .prepare("SELECT id, name, email, role, plan, credits_remaining, extra_credits, credits_total FROM users ORDER BY created_at DESC")
+            .all<{ id: string; name: string; email: string; role: string; plan: string; credits_remaining: number; extra_credits: number; credits_total: number }>();
 
         const users = usersResult.results ?? [];
 
@@ -98,7 +104,7 @@ export async function GET(req: NextRequest) {
         return NextResponse.json(enriched);
     } catch (err: any) {
         console.error("[Admin Users GET]", err);
-        return NextResponse.json({ error: err.message }, { status: 500 });
+        return fail(ErrorCode.SERVER_ERROR, { detail: err, context: "admin-users" });
     }
 }
 
@@ -106,7 +112,7 @@ export async function GET(req: NextRequest) {
 export async function PATCH(req: NextRequest) {
     const caller = getSessionUser(req);
     if (caller?.role !== "admin") {
-        return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+        return fail(ErrorCode.UNAUTHORIZED, { context: "admin-users" });
     }
 
     try {
@@ -121,17 +127,17 @@ export async function PATCH(req: NextRequest) {
         const { userId, customLimit, plan, role, password, credits_remaining } = body;
 
         if (!userId) {
-            return NextResponse.json({ error: "Missing userId" }, { status: 400 });
+            return fail(ErrorCode.MISSING_FIELDS, { context: "admin-users" });
         }
 
         const VALID_PLANS = ["Free", "Starter", "Pro", "Enterprise", "System"];
         const VALID_ROLES = ["user", "admin"];
 
         if (plan && !VALID_PLANS.includes(plan)) {
-            return NextResponse.json({ error: "Invalid plan" }, { status: 400 });
+            return fail(ErrorCode.BAD_REQUEST, { detail: "invalid plan", context: "admin-users" });
         }
         if (role && !VALID_ROLES.includes(role)) {
-            return NextResponse.json({ error: "Invalid role" }, { status: 400 });
+            return fail(ErrorCode.BAD_REQUEST, { detail: "invalid role", context: "admin-users" });
         }
 
         const env = await getCFEnv();
@@ -165,7 +171,8 @@ export async function PATCH(req: NextRequest) {
             }
 
             if (password) {
-                await env.DB.prepare("UPDATE users SET password = ? WHERE id = ?").bind(password, userId).run();
+                const passwordHash = await hashPassword(password);
+                await env.DB.prepare("UPDATE users SET password = ? WHERE id = ?").bind(passwordHash, userId).run();
             }
 
             if (credits_remaining !== undefined) {
@@ -196,6 +203,6 @@ export async function PATCH(req: NextRequest) {
         return NextResponse.json({ success: true });
     } catch (err: any) {
         console.error("[Admin Users PATCH]", err);
-        return NextResponse.json({ error: err.message }, { status: 500 });
+        return fail(ErrorCode.SERVER_ERROR, { detail: err, context: "admin-users" });
     }
 }

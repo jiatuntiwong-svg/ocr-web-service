@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import Stripe from "stripe";
+import { ok, fail, ErrorCode } from "@/lib/apiResponse";
 
 
 export async function POST(request: NextRequest) {
@@ -28,7 +29,7 @@ export async function POST(request: NextRequest) {
         };
 
         if (!userId) {
-            return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+            return fail(ErrorCode.UNAUTHORIZED, { context: "checkout" });
         }
 
         const sessionParams: Stripe.Checkout.SessionCreateParams = {
@@ -73,9 +74,8 @@ export async function POST(request: NextRequest) {
 
         const session = await stripe.checkout.sessions.create(sessionParams);
 
-        return NextResponse.json({ url: session.url });
+        return ok({ url: session.url });
     } catch (err: any) {
-        console.error("Stripe Session Error:", err);
-        return NextResponse.json({ error: err.message }, { status: 500 });
+        return fail(ErrorCode.CHECKOUT_FAILED, { detail: err, context: "checkout" });
     }
 }

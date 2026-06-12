@@ -1,33 +1,45 @@
-<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+<svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="logo_grad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#0094FF;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#001A72;stop-opacity:1" />
+    <linearGradient id="docroom-stroke" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#C7D2FE"/>
+      <stop offset="100%" stop-color="#6366F1"/>
     </linearGradient>
+    <linearGradient id="docroom-beam" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%"   stop-color="#818CF8" stop-opacity="0"/>
+      <stop offset="30%"  stop-color="#818CF8"/>
+      <stop offset="70%"  stop-color="#C7D2FE"/>
+      <stop offset="100%" stop-color="#818CF8" stop-opacity="0"/>
+    </linearGradient>
+    <clipPath id="docroom-d">
+      <path d="M36 28 L36 172 L84 172 C152 172 176 140 176 100 C176 60 152 28 84 28 Z"/>
+    </clipPath>
   </defs>
-  
-  <!-- Stylized 'D' / Document Shape -->
-  <path d="M300 250 L700 250 C850 250 900 400 900 550 C900 700 850 850 700 850 L300 850 Z" fill="url(#logo_grad)" />
-  
-  <!-- Counter-shape / Inner part -->
-  <path d="M400 350 L700 350 C800 350 820 450 820 550 C820 650 800 750 700 750 L400 750 Z" fill="white" />
-  
-  <!-- Document Lines -->
-  <rect x="450" y="420" width="300" height="25" rx="10" fill="url(#logo_grad)" />
-  <rect x="450" y="480" width="350" height="25" rx="10" fill="url(#logo_grad)" />
-  <rect x="450" y="540" width="320" height="25" rx="10" fill="url(#logo_grad)" />
-  <rect x="450" y="600" width="380" height="25" rx="10" fill="url(#logo_grad)" />
-  <rect x="450" y="660" width="280" height="25" rx="10" fill="url(#logo_grad)" />
-
-  <!-- Motion Lines (The Spikes on the left) -->
-  <path d="M250 450 L100 512 L250 500 Z" fill="url(#logo_grad)" />
-  <path d="M250 550 L120 580 L250 560 Z" fill="url(#logo_grad)" />
-  <path d="M250 650 L150 650 L250 630 Z" fill="url(#logo_grad)" />
-  <rect x="230" y="430" width="100" height="20" rx="10" fill="url(#logo_grad)" />
-  <rect x="210" y="510" width="120" height="20" rx="10" fill="url(#logo_grad)" />
-  <rect x="180" y="590" width="150" height="20" rx="10" fill="url(#logo_grad)" />
-  
-  <!-- Corner Fold (Top-Left of D) -->
-  <path d="M300 250 L450 250 L300 400 Z" fill="#0057FF" opacity="0.8" />
-  <path d="M450 250 L450 400 L300 400 Z" fill="#0029FF" />
+  <!-- Scan beam clipped to the D silhouette. SMIL keeps it animated when the
+       SVG is rendered as <img>, in favicons, and as inline markup. -->
+  <g clip-path="url(#docroom-d)">
+    <g>
+      <rect x="0" y="92" width="200" height="16" fill="url(#docroom-beam)" opacity="0.2"/>
+      <rect x="0" y="97" width="200" height="6"  fill="url(#docroom-beam)" opacity="0.9"/>
+      <animateTransform
+        attributeName="transform"
+        type="translate"
+        values="0,-34; 0,34; 0,-34"
+        keyTimes="0; 0.5; 1"
+        dur="3s"
+        repeatCount="indefinite"
+        calcMode="spline"
+        keySplines="0.4 0 0.6 1; 0.4 0 0.6 1"/>
+      <animate
+        attributeName="opacity"
+        values="0; 1; 1; 0; 0; 1; 1; 0"
+        keyTimes="0; 0.04; 0.46; 0.5; 0.5; 0.54; 0.96; 1"
+        dur="3s"
+        repeatCount="indefinite"/>
+    </g>
+  </g>
+  <!-- D silhouette: corner brackets + arcs -->
+  <path d="M36 74 L36 28 L88 28"    fill="none" stroke="url(#docroom-stroke)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M36 126 L36 172 L88 172" fill="none" stroke="url(#docroom-stroke)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M124 28 C164 28 176 60 176 100"   fill="none" stroke="url(#docroom-stroke)" stroke-width="11" stroke-linecap="round"/>
+  <path d="M176 100 C176 140 164 172 124 172" fill="none" stroke="url(#docroom-stroke)" stroke-width="11" stroke-linecap="round"/>
 </svg>

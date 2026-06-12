@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { fail, ErrorCode } from "@/lib/apiResponse";
 
 
 
@@ -27,7 +28,7 @@ async function getCFEnv() {
 export async function GET(req: NextRequest) {
     const caller = getSessionUser(req);
     if (caller?.role !== "admin") {
-        return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+        return fail(ErrorCode.UNAUTHORIZED, { context: "admin-logs" });
     }
 
     try {
@@ -58,6 +59,6 @@ export async function GET(req: NextRequest) {
         return NextResponse.json({ success: true, logs: results || [] });
     } catch (error: any) {
         console.error("[Admin Logs GET]", error);
-        return NextResponse.json({ success: false, error: error.message || "Failed to fetch logs" }, { status: 500 });
+        return fail(ErrorCode.SERVER_ERROR, { detail: error, context: "admin-logs" });
     }
 }

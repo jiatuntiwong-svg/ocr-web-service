@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { DEV_USERS } from "@/lib/devUsers";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { logSystemEvent } from "@/lib/logger";
+import { ok, fail, ErrorCode } from "@/lib/apiResponse";
+import { verifyPassword, hashPassword, isHashed } from "@/lib/passwordHash";
+import { broadcastToAdmins, wasNotifiedRecently } from "@/lib/notifications";
 
 
 type UserPayload = { id: string; name: string; email: string; role: string; plan: string; ts: number };
@@ -22,22 +25,34 @@ function parseToken(token: string): UserPayload | null {
     }
 }
 
-// ─── Try to get Cloudflare D1 (only works under wrangler dev / production) ───
-async function queryUserFromDB(email: string, password?: string) {
+// Returns:
+//   row    — user found
+//   null   — DB reachable, no such user
+//   undefined — DB not reachable (caller falls back to DEV_USERS)
+async function lookupUserByEmail(email: string) {
     try {
         const { env } = await getCloudflareContext();
         if (!env?.DB) throw new Error("no DB binding");
-
-        const query = password
-            ? "SELECT id, name, email, role, plan FROM users WHERE email = ? AND password = ? LIMIT 1"
-            : "SELECT id, name, email, role, plan FROM users WHERE email = ? LIMIT 1";
-
-        const stmt = env.DB.prepare(query);
-        const row = await (password ? stmt.bind(email, password) : stmt.bind(email)).first<{ id: string; name: string; email: string; role: string; plan: string }>();
+        const row = await env.DB
+            .prepare("SELECT id, name, email, role, plan, password FROM users WHERE email = ? LIMIT 1")
+            .bind(email)
+            .first<{ id: string; name: string; email: string; role: string; plan: string; password: string }>();
         return row ?? null;
     } catch {
         return undefined;
     }
+}
+
+// One-way migration: any legacy plaintext password we successfully verify gets
+// rewritten as a real PBKDF2 hash. Best-effort — failures here must not block
+// the login that just succeeded.
+async function upgradeLegacyPassword(userId: string, plain: string) {
+    try {
+        const { env } = await getCloudflareContext();
+        if (!env?.DB) return;
+        const newHash = await hashPassword(plain);
+        await env.DB.prepare("UPDATE users SET password = ? WHERE id = ?").bind(newHash, userId).run();
+    } catch {}
 }
 
 function setSessionCookie(response: NextResponse, token: string) {
@@ -57,30 +72,60 @@ export async function POST(req: NextRequest) {
         const password = body.password ?? "";
 
         if (!email || !password) {
-            return NextResponse.json({ error: "Email and password are required" }, { status: 400 });
+            return fail(ErrorCode.MISSING_FIELDS, { context: "auth-login" });
         }
 
         // 1. Try Cloudflare D1
-        const dbUser = await queryUserFromDB(email, password);
+        const dbRow = await lookupUserByEmail(email);
 
         let foundUser: { id: string; name: string; email: string; role: string; plan: string } | null = null;
 
-        if (dbUser !== undefined) {
-            // CF D1 was reachable — use its result (may be null if wrong credentials)
-            foundUser = dbUser;
-        } else {
-            // Fallback to hardcoded dev accounts
+        if (dbRow === undefined) {
+            // DB unreachable — fall back to hardcoded dev accounts (plaintext compare is fine,
+            // these are well-known dev creds not real user data).
             const match = DEV_USERS.find(u => u.email === email && u.password === password);
             foundUser = match ? { id: match.id, name: match.name, email: match.email, role: match.role, plan: match.plan } : null;
+        } else if (dbRow !== null) {
+            const valid = await verifyPassword(password, dbRow.password);
+            if (valid) {
+                foundUser = { id: dbRow.id, name: dbRow.name, email: dbRow.email, role: dbRow.role, plan: dbRow.plan };
+                if (!isHashed(dbRow.password)) {
+                    await upgradeLegacyPassword(dbRow.id, password);
+                }
+            }
         }
 
         if (!foundUser) {
-            // Log failed login attempt
+            // Log failed login attempt + admin notification on spike (5+ failures
+            // in last 10min). Dedup via wasNotifiedRecently so we don't fire
+            // every subsequent failure once the threshold is crossed.
             try {
                 const { env } = await getCloudflareContext();
-                if (env) await logSystemEvent(env, "LOGIN_FAILED", `Failed login attempt for: ${email}`, "warning");
+                if (env) {
+                    await logSystemEvent(env, "LOGIN_FAILED", `Failed login attempt for: ${email}`, "warning");
+                    try {
+                        const recent = await env.DB.prepare(
+                            "SELECT COUNT(*) AS n FROM system_logs WHERE action = 'LOGIN_FAILED' AND created_at > datetime('now', '-10 minutes')",
+                        ).first<{ n: number }>();
+                        if ((recent?.n ?? 0) >= 5) {
+                            // Use one admin row as the dedup key — any admin getting this
+                            // notification recently means all admins already got it.
+                            const anyAdmin = await env.DB.prepare("SELECT id FROM users WHERE role = 'admin' LIMIT 1").first<{ id: string }>();
+                            if (anyAdmin && !(await wasNotifiedRecently(env, anyAdmin.id, "login_fail_spike", 10))) {
+                                await broadcastToAdmins(env, {
+                                    kind: "login_fail_spike",
+                                    severity: "warning",
+                                    title: "Login failure spike",
+                                    body: `${recent!.n} failed logins in the last 10 minutes`,
+                                    link: "/admin_logs",
+                                    metadata: { count: recent!.n, windowMinutes: 10 },
+                                });
+                            }
+                        }
+                    } catch {}
+                }
             } catch {}
-            return NextResponse.json({ error: "Invalid email or password" }, { status: 401 });
+            return fail(ErrorCode.LOGIN_FAILED, { context: "auth-login" });
         }
 
         // Log successful login
@@ -90,12 +135,11 @@ export async function POST(req: NextRequest) {
         } catch {}
 
         const token = makeToken(foundUser);
-        const response = NextResponse.json({ success: true, user: foundUser });
+        const response = ok({ user: foundUser, success: true });
         setSessionCookie(response, token);
         return response;
     } catch (err: any) {
-        console.error("[Auth POST] error:", err);
-        return NextResponse.json({ error: err.message ?? "Login failed" }, { status: 500 });
+        return fail(ErrorCode.SERVER_ERROR, { detail: err, context: "auth-login" });
     }
 }
 
@@ -113,9 +157,10 @@ export async function GET(req: NextRequest) {
     }
 
     // ── Check DB first even for dev users to allow plan updates ──────
-    const dbUser = await queryUserFromDB(payload.email, ""); // We trust the token's email
-    if (dbUser) {
-        return NextResponse.json({ user: dbUser });
+    const dbRow = await lookupUserByEmail(payload.email); // We trust the token's email
+    if (dbRow) {
+        const { password: _pw, ...safe } = dbRow;
+        return NextResponse.json({ user: safe });
     }
 
     // ── Fallback to DEV_USERS if not found in DB ──────────────────

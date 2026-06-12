@@ -1,5 +1,7 @@
 "use client";
 import React, { useState, useEffect, useCallback } from "react";
+import { useTranslation } from "@/lib/i18n/LocaleContext";
+import { apiError } from "@/lib/friendlyError";
 
 interface AdminUser {
     id: string;
@@ -62,6 +64,7 @@ function StatCard({ icon, label, value, sub, color }: { icon: React.ReactNode; l
 }
 
 export default function AdminUsersView() {
+    const { t } = useTranslation();
     const [users, setUsers] = useState<AdminUser[]>([]);
     const [loading, setLoading] = useState(true);
     const [search, setSearch] = useState("");
@@ -88,7 +91,7 @@ export default function AdminUsersView() {
             const data = await res.json() as AdminUser[];
             setUsers(data);
         } catch (e: any) {
-            showToast(`โหลดข้อมูลไม่สำเร็จ: ${e.message}`, "error");
+            showToast(t("admin.usersLoadFail", { msg: e.message }), "error");
         } finally {
             setLoading(false);
         }
@@ -115,21 +118,21 @@ export default function AdminUsersView() {
             body: JSON.stringify(body),
         });
         const data = await res.json() as { success?: boolean; error?: string; dev?: boolean };
-        if (!res.ok || !data.success) throw new Error(data.error || "ไม่สามารถบันทึกได้");
-        if (data.dev) showToast("บันทึกสำเร็จ (Dev mode — ไม่ถาวร)", "info");
-        else showToast("บันทึกสำเร็จ ✓");
+        if (!res.ok || !data.success) throw new Error(data.error || t("admin.usersSaveFail"));
+        if (data.dev) showToast(t("admin.usersSavedDev"), "info");
+        else showToast(t("admin.usersSavedOk"));
     };
 
     const saveCredit = async (userId: string) => {
         const val = editValue.trim();
         const parsed = val === "" ? null : parseInt(val, 10);
-        if (parsed !== null && (isNaN(parsed) || parsed < 0)) { showToast("กรุณากรอกตัวเลขที่ถูกต้อง", "error"); return; }
+        if (parsed !== null && (isNaN(parsed) || parsed < 0)) { showToast(t("admin.usersInvalidNumber"), "error"); return; }
         setSaving(true);
         try {
             await patchUser({ userId, customLimit: parsed });
             cancelEdit();
             await fetchUsers();
-        } catch (e: any) { showToast(e.message, "error"); }
+        } catch (e: any) { showToast(apiError(e?.code || "GENERIC", e?.vars, t), "error"); }
         finally { setSaving(false); }
     };
 
@@ -139,7 +142,7 @@ export default function AdminUsersView() {
             await patchUser({ userId, plan: editValue });
             cancelEdit();
             await fetchUsers();
-        } catch (e: any) { showToast(e.message, "error"); }
+        } catch (e: any) { showToast(apiError(e?.code || "GENERIC", e?.vars, t), "error"); }
         finally { setSaving(false); }
     };
 
@@ -149,15 +152,15 @@ export default function AdminUsersView() {
             await patchUser({ userId, role: editValue });
             cancelEdit();
             await fetchUsers();
-        } catch (e: any) { showToast(e.message, "error"); }
+        } catch (e: any) { showToast(apiError(e?.code || "GENERIC", e?.vars, t), "error"); }
         finally { setSaving(false); }
     };
 
     const resetCredit = async (userId: string) => {
-        if (!confirm("รีเซ็ต credit limit กลับเป็นค่าเริ่มต้นของ plan?")) return;
+        if (!confirm(t("admin.usersResetConfirm"))) return;
         setSaving(true);
         try { await patchUser({ userId, customLimit: null }); await fetchUsers(); }
-        catch (e: any) { showToast(e.message, "error"); }
+        catch (e: any) { showToast(apiError(e?.code || "GENERIC", e?.vars, t), "error"); }
         finally { setSaving(false); }
     };
 
@@ -171,7 +174,7 @@ export default function AdminUsersView() {
             });
             cancelEdit();
             await fetchUsers();
-        } catch (e: any) { showToast(e.message, "error"); }
+        } catch (e: any) { showToast(apiError(e?.code || "GENERIC", e?.vars, t), "error"); }
         finally { setSaving(false); }
     };
 
@@ -211,7 +214,7 @@ export default function AdminUsersView() {
                 />
                 <StatCard
                     icon={<svg className="w-5 h-5 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>}
-                    label="Docs Processed" value={totalDocs.toLocaleString()} sub="รวมทุก user"
+                    label="Docs Processed" value={totalDocs.toLocaleString()} sub={t("admin.usersDocsAll")}
                     color="bg-emerald-50 dark:bg-emerald-900/20"
                 />
                 <StatCard
@@ -223,7 +226,7 @@ export default function AdminUsersView() {
                 />
                 <StatCard
                     icon={<svg className="w-5 h-5 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>}
-                    label="Low Credit Alert" value={lowCredit} sub="users มี credit ต่ำกว่า 20%"
+                    label="Low Credit Alert" value={lowCredit} sub={t("admin.usersLowCreditSub")}
                     color="bg-amber-50 dark:bg-amber-900/20"
                 />
             </div>
@@ -240,13 +243,13 @@ export default function AdminUsersView() {
                             </span>
                             User Management
                         </h3>
-                        <p className="text-xs text-slate-400 mt-0.5">แก้ไข Plan · Role · Credit Limit ของทุก user</p>
+                        <p className="text-xs text-slate-400 mt-0.5">{t("admin.usersSubtitle")}</p>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                         {/* Search */}
                         <div className="relative">
                             <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
-                            <input type="text" placeholder="ค้นหา..." value={search} onChange={e => setSearch(e.target.value)}
+                            <input type="text" placeholder={t("admin.search")} value={search} onChange={e => setSearch(e.target.value)}
                                 className="pl-8 pr-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm font-medium text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500 w-48" />
                         </div>
                         {/* Role filter */}
@@ -272,19 +275,19 @@ export default function AdminUsersView() {
                 {loading ? (
                     <div className="flex items-center justify-center py-24 gap-3 text-slate-400">
                         <div className="h-5 w-5 border-2 border-slate-300 border-t-blue-600 rounded-full animate-spin" />
-                        <span className="text-sm font-bold">กำลังโหลด...</span>
+                        <span className="text-sm font-bold">{t("admin.loading")}</span>
                     </div>
                 ) : filtered.length === 0 ? (
                     <div className="text-center py-24 text-slate-400">
                         <svg className="w-10 h-10 mx-auto mb-3 opacity-30" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
-                        <p className="text-sm font-bold">ไม่พบผู้ใช้ที่ตรงกัน</p>
+                        <p className="text-sm font-bold">{t("admin.usersNotFound")}</p>
                     </div>
                 ) : (
                     <div className="overflow-x-auto">
                         <table className="w-full text-sm">
                             <thead className="bg-slate-50/70 dark:bg-slate-800/50">
                                 <tr className="border-b border-slate-100 dark:border-slate-800">
-                                    {["ผู้ใช้", "Role", "Plan", "Docs", "Credit Limit", "คงเหลือ", "จัดการ"].map(h => (
+                                    {[t("admin.usersColUser"), "Role", "Plan", "Docs", "Credit Limit", t("admin.usersColRemaining"), t("admin.usersColManage")].map(h => (
                                         <th key={h} className="px-5 py-3.5 text-left text-[9px] font-black uppercase tracking-[0.15em] text-slate-400">{h}</th>
                                     ))}
                                 </tr>
@@ -350,7 +353,7 @@ export default function AdminUsersView() {
                                             {/* Docs */}
                                             <td className="px-5 py-4">
                                                 <p className="font-bold dark:text-white text-sm">{u.totalDocs.toLocaleString()}</p>
-                                                <p className="text-[10px] text-slate-400">เอกสาร</p>
+                                                <p className="text-[10px] text-slate-400">{t("admin.usersDocs")}</p>
                                             </td>
 
                                             {/* Credit Limit (editable) */}
@@ -359,7 +362,7 @@ export default function AdminUsersView() {
                                                     <div className="flex items-center gap-1.5">
                                                         <input type="number" min={0} value={editValue} onChange={e => setEditValue(e.target.value)}
                                                             onKeyDown={e => { if (e.key === "Enter") saveCredit(u.id); if (e.key === "Escape") cancelEdit(); }}
-                                                            autoFocus placeholder="ตัวเลข"
+                                                            autoFocus placeholder={t("admin.usersPlaceholderNumber")}
                                                             className="w-24 px-2.5 py-1.5 rounded-lg border-2 border-blue-500 bg-blue-50 dark:bg-blue-900/20 text-sm font-bold focus:outline-none" />
                                                         <button onClick={() => saveCredit(u.id)} disabled={saving} className="p-1.5 rounded-lg bg-emerald-500 text-white hover:bg-emerald-600 disabled:opacity-50"><svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" /></svg></button>
                                                         <button onClick={cancelEdit} className="p-1.5 rounded-lg bg-slate-200 dark:bg-slate-700 text-slate-500"><svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" /></svg></button>
@@ -456,7 +459,7 @@ export default function AdminUsersView() {
                                                         </button>
                                                         <button onClick={() => startEdit(u, "credit")}
                                                             className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-blue-50 dark:bg-blue-900/20 text-blue-600 hover:bg-blue-100 text-[10px] font-black uppercase tracking-wide transition-all"
-                                                            title="แก้ไข Limit">
+                                                            title={t("admin.usersEditLimit")}>
                                                             <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
                                                             Limit
                                                         </button>
@@ -474,8 +477,8 @@ export default function AdminUsersView() {
                 {/* Footer */}
                 {!loading && (
                     <div className="px-8 py-4 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between">
-                        <p className="text-[11px] text-slate-400 font-bold">แสดง <span className="text-slate-600 dark:text-slate-300">{filtered.length}</span> จาก <span className="text-slate-600 dark:text-slate-300">{users.length}</span> user</p>
-                        <p className="text-[11px] text-slate-400">คลิก Role หรือ Plan เพื่อเปลี่ยนแบบ inline · คลิก Credit เพื่อแก้ไข limit</p>
+                        <p className="text-[11px] text-slate-400 font-bold">{t("admin.usersShowing")} <span className="text-slate-600 dark:text-slate-300">{filtered.length}</span> {t("admin.usersOutOf")} <span className="text-slate-600 dark:text-slate-300">{users.length}</span> user</p>
+                        <p className="text-[11px] text-slate-400">{t("admin.usersHelpInline")}</p>
                     </div>
                 )}
             </div>

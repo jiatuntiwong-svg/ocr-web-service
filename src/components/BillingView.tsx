@@ -1,5 +1,10 @@
 "use client";
 import React, { useState } from 'react';
+import { useToast } from "@/components/Toast";
+import { useTranslation } from "@/lib/i18n/LocaleContext";
+import { apiError } from "@/lib/friendlyError";
+import { fetchJson } from "@/lib/fetchJson";
+import { ErrorCode } from "@/lib/errorCodes";
 
 interface BillingViewProps {
     userPlan: string;
@@ -7,6 +12,8 @@ interface BillingViewProps {
 }
 
 export default function BillingView({ userPlan, userId }: BillingViewProps) {
+    const { t } = useTranslation();
+    const { showToast, toastNode } = useToast();
     const [loading, setLoading] = useState<string | null>(null);
     const [isSuccess, setIsSuccess] = useState(false);
     const [prices, setPrices] = useState<Record<string, string>>({});
@@ -29,24 +36,19 @@ export default function BillingView({ userPlan, userId }: BillingViewProps) {
 
     const handleCheckout = async (plan: string, type: 'subscription' | 'topup', credits?: number) => {
         setLoading(plan);
-        try {
-            const response = await fetch('/api/billing/checkout', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ userId, plan, type, credits }),
-            });
-            const data = await response.json() as { url?: string; error?: string };
-            if (data.url) {
-                window.location.href = data.url;
-            } else {
-                alert(data.error || "Failed to initiate checkout");
-            }
-        } catch (err) {
-            console.error(err);
-            alert("Something went wrong");
-        } finally {
-            setLoading(null);
+        const data = await fetchJson<{ url?: string }>('/api/billing/checkout', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userId, plan, type, credits }),
+        });
+        setLoading(null);
+        if (data.ok && data.url) {
+            window.location.href = data.url;
+            return;
         }
+        const code = data.ok ? ErrorCode.CHECKOUT_FAILED : data.code;
+        const vars = data.ok ? undefined : data.vars;
+        showToast(apiError(code, vars, t), "error");
     };
 
     const plans = [
@@ -97,6 +99,7 @@ export default function BillingView({ userPlan, userId }: BillingViewProps) {
 
     return (
         <div className="space-y-12 animate-in fade-in slide-in-from-right-5 duration-700">
+            {toastNode}
             {loading && (
                 <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-[100] flex items-center justify-center">
                     <div className="bg-white dark:bg-slate-900 p-8 rounded-3xl shadow-2xl flex flex-col items-center gap-4">

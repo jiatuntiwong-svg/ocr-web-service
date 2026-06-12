@@ -1,9 +1,13 @@
 "use client";
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { useTranslation } from "@/lib/i18n/LocaleContext";
+import { apiError } from "@/lib/friendlyError";
+import { fetchJson } from "@/lib/fetchJson";
 
 export default function LoginPage() {
     const router = useRouter();
+    const { t } = useTranslation();
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
     const [loading, setLoading] = useState(false);
@@ -26,31 +30,18 @@ export default function LoginPage() {
         e.preventDefault();
         setError("");
         setLoading(true);
-        try {
-            const res = await fetch("/api/auth", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ email, password }),
-            });
-            const data = await res.json() as { success?: boolean; error?: string; user?: any };
-            if (data.success) {
-                // Store user info in localStorage for instant UI access
-                localStorage.setItem("ocr_user", JSON.stringify(data.user));
-                router.replace("/");
-            } else {
-                setError(data.error || "Login failed");
-            }
-        } catch {
-            setError("Connection error. Please try again.");
-        } finally {
-            setLoading(false);
+        const res = await fetchJson<{ user: any }>("/api/auth", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email, password }),
+        });
+        setLoading(false);
+        if (res.ok) {
+            localStorage.setItem("ocr_user", JSON.stringify(res.user));
+            router.replace("/");
+        } else {
+            setError(apiError(res.code, res.vars, t));
         }
-    };
-
-    const fillDemo = (e: string, p: string) => {
-        setEmail(e);
-        setPassword(p);
-        setError("");
     };
 
     if (!mounted) return null;
@@ -165,45 +156,6 @@ export default function LoginPage() {
                             Create a Free Account
                         </a>
                     </p>
-                </div>
-
-                {/* Test Accounts */}
-                <div className="bg-white dark:bg-slate-900 rounded-[2rem] border border-slate-200 dark:border-slate-800 shadow-sm p-6">
-                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-4">🧪 Test Accounts</p>
-                    <div className="space-y-2">
-                        {[
-                            { label: "Free", email: "free@ocrpro.com", pass: "free1234", badge: "Free Plan", color: "slate" },
-                            { label: "Starter", email: "starter@ocrpro.com", pass: "start123", badge: "Starter Plan", color: "blue" },
-                            { label: "Pro", email: "pro@ocrpro.com", pass: "pro12345", badge: "Pro Plan", color: "violet" },
-                            { label: "Enterprise", email: "ent@ocrpro.com", pass: "ent1234", badge: "Enterprise Plan", color: "emerald" },
-                            { label: "Admin", email: "admin@ocrpro.com", pass: "admin1234", badge: "System Admin", color: "amber" },
-                        ].map(acc => (
-                            <button
-                                key={acc.email}
-                                onClick={() => fillDemo(acc.email, acc.pass)}
-                                className="w-full flex items-center justify-between px-4 py-3 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-800 border border-transparent hover:border-slate-100 dark:hover:border-slate-700 transition-all group text-left"
-                            >
-                                <div className="flex items-center gap-3">
-                                    <div className={`h-8 w-8 rounded-lg flex items-center justify-center text-xs font-black ${acc.color === 'violet' ? 'bg-violet-100 dark:bg-violet-900/30 text-violet-600' : 'bg-blue-100 dark:bg-blue-900/30 text-blue-600'}`}>
-                                        {acc.label.charAt(0)}
-                                    </div>
-                                    <div>
-                                        <p className="text-xs font-bold text-slate-700 dark:text-slate-300">{acc.email}</p>
-                                        <p className="text-[10px] text-slate-400">Password: <span className="font-mono font-bold">{acc.pass}</span></p>
-                                    </div>
-                                </div>
-                                <span className={`text-[9px] font-black uppercase px-2 py-1 rounded-md ${acc.color === 'amber' ? 'bg-amber-100   dark:bg-amber-900/30   text-amber-600' :
-                                    acc.color === 'emerald' ? 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600' :
-                                        acc.color === 'violet' ? 'bg-violet-100  dark:bg-violet-900/30  text-violet-600' :
-                                            acc.color === 'blue' ? 'bg-blue-100    dark:bg-blue-900/30    text-blue-600' :
-                                                'bg-slate-100   dark:bg-slate-800       text-slate-500'
-                                    }`}>
-                                    {acc.badge}
-                                </span>
-                            </button>
-                        ))}
-                    </div>
-                    <p className="text-[10px] text-slate-400 mt-3 text-center">Click any account to auto-fill credentials</p>
                 </div>
 
                 <p className="text-center text-[10px] text-slate-400">

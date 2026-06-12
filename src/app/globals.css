@@ -1,32 +1,157 @@
 @import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@300;400;500;600;700;800&display=swap');
 
-:root {
-	--background: #ffffff;
-	--foreground: #171717;
-}
+/* Force class-based dark mode (instead of prefers-color-scheme) — lets us
+ * lock the app to dark regardless of the user's system setting, and lights up
+ * every existing `dark:` variant in legacy components for free during the
+ * redesign migration. */
+@custom-variant dark (&:where(.dark, .dark *));
 
+/* ─── Design Tokens (DOCRoom redesign) ──────────────────────────────────── */
+/* Dark values are the default; light values override under :where(:not(.dark)).
+ * Components should reference these as `var(--color-...)` in inline styles —
+ * NEVER hard-code hex — so flipping the .dark class on <html> swaps the whole
+ * theme without touching component code. */
 @theme inline {
-	--color-background: var(--background);
-	--color-foreground: var(--foreground);
-	--font-sans: var(--font-geist-sans);
-	--font-mono: var(--font-geist-mono);
+  /* Backgrounds */
+  --color-bg-body:     #07111e;
+  --color-bg-surface:  #0a1628;
+  --color-bg-panel:    #0c1526;
+  --color-bg-card:     #112036;
+  --color-bg-elevated: #162944;
+
+  /* Borders */
+  --color-border:        rgba(255, 255, 255, 0.06);
+  --color-border-strong: rgba(255, 255, 255, 0.12);
+
+  /* Text */
+  --color-text-1: #e8edf5;
+  --color-text-2: #94a3b8;
+  --color-text-3: #4a6280;
+  --color-text-4: #2d4260;
+
+  /* Accent — cyan default */
+  --color-accent:        #06b6d4;
+  --color-accent-dim:    #06b6d41a;
+  --color-accent-border: #06b6d433;
+
+  /* Status */
+  --color-success: #10b981;
+  --color-warning: #f59e0b;
+  --color-danger:  #ef4444;
+  --color-info:    #3b82f6;
+
+  /* Zone accents (per-feature) */
+  --color-ocr:     #6366f1;
+  --color-compare: #f59e0b;
+  --color-admin:   #10b981;
 }
 
-@media (prefers-color-scheme: dark) {
-	:root {
-		--background: #0a0a0a;
-		--foreground: #ededed;
-	}
+/* ─── Light theme overrides ─────────────────────────────────────────────── */
+/* Activates when <html> does NOT have class="dark". Placeholder palette for
+ * Phase 7 light-mode toggle — tweak values once the light spec lands. */
+:where(html:not(.dark)) {
+  --color-bg-body:     #f8fafc;
+  --color-bg-surface:  #ffffff;
+  --color-bg-panel:    #ffffff;
+  --color-bg-card:     #ffffff;
+  --color-bg-elevated: #f1f5f9;
+
+  --color-border:        rgba(15, 23, 42, 0.08);
+  --color-border-strong: rgba(15, 23, 42, 0.16);
+
+  --color-text-1: #0f172a;
+  --color-text-2: #475569;
+  --color-text-3: #64748b;
+  --color-text-4: #94a3b8;
+}
+
+/* ─── Base ──────────────────────────────────────────────────────────────── */
+html, body {
+  min-height: 100vh;
 }
 
 body {
-	background-image: linear-gradient(rgba(0, 0, 0, 0.05), rgba(0, 0, 0, 0.05)), url('/background.png');
-	background-size: cover;
-	background-position: center;
-	background-attachment: fixed;
-	background-repeat: no-repeat;
-	background-color: var(--background);
-	color: var(--foreground);
-	font-family: Arial, Helvetica, sans-serif;
-	min-height: 100vh;
+  background: #07111e;
+  color: #e8edf5;
+  font-family: 'Noto Sans Thai', system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ─── Animations ────────────────────────────────────────────────────────── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.view-enter {
+  animation: fadeIn 0.18s ease;
+}
+
+/* ─── Scrollbar (dark theme) ────────────────────────────────────────────── */
+.custom-scrollbar::-webkit-scrollbar { width: 8px; height: 8px; }
+.custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.12); }
+
+/* ─── Responsive overrides ──────────────────────────────────────────────────
+ * The app was designed desktop-first with inline styles, so these media
+ * queries cover the cases the inline styles can't reach: prevent horizontal
+ * scroll on phones, shrink dense paddings, and let workspace columns stack
+ * instead of squeezing side-by-side at narrow widths.
+ */
+html, body {
+  /* Without this, hardcoded pixel widths inside components can push the page
+   * wider than the viewport on phones and force horizontal scrolling. */
+  overflow-x: hidden;
+  max-width: 100vw;
+}
+
+/* Tablet portrait + small laptops — sidebar already auto-collapses via JS
+ * (page.tsx), so here we just tighten paddings and let 2-col workspaces wrap. */
+@media (max-width: 1023px) {
+  .compare-2col, .ocr-2col {
+    flex-direction: column !important;
+  }
+  .compare-2col > *, .ocr-2col > * {
+    min-width: 0 !important;
+    width: 100% !important;
+  }
+  /* Result panels stop trying to share screen with the source preview;
+   * they stack underneath instead. */
+  [data-pane="preview"], [data-pane="result"] {
+    flex: 1 1 auto !important;
+    min-height: 360px;
+  }
+}
+
+/* Phones — drop dashboard's 4-column metric grid to 2 cols, shrink chrome. */
+@media (max-width: 640px) {
+  body { font-size: 14px; }
+  /* Dashboard top metrics: 4 cards → 2 cards per row */
+  .dash-metric-grid {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+  /* TopBar — hide subtitle (we keep title + chips) so it doesn't squeeze on
+   * 360px-wide phones. */
+  [data-topbar-subtitle] { display: none !important; }
+  /* Notification dropdown — let it use the full viewport width instead of
+   * its fixed 360px so it doesn't overflow on narrow phones. */
+  [data-notif-dropdown] {
+    width: calc(100vw - 24px) !important;
+    right: 12px !important;
+    max-width: 380px;
+  }
+  /* Tighter top-bar credit/plan chips so they don't wrap. */
+  [data-topbar-chip] { font-size: 11px !important; padding: 4px 8px !important; }
 }

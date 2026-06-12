@@ -39,12 +39,16 @@ export function useStats(user: User | null) {
                     recentActivity: data.recentActivity || [],
                     weeklyData: data.weeklyData || [],
                     weekLabels: data.weekLabels || [],
+                    weeklyCompareData: data.weeklyCompareData || [],
                     monthlyData: data.monthlyData || [],
                     monthLabels: data.monthLabels || [],
+                    monthlyCompareData: data.monthlyCompareData || [],
                     yearlyData: data.yearlyData || [],
                     yearLabels: data.yearLabels || [],
                     avgSpeedMs: data.avgSpeedMs || 0,
                     avgConfidence: data.avgConfidence || 0,
+                    functionUsage: data.functionUsage,
+                    features: data.features,
                 });
             }
         } catch (err) {

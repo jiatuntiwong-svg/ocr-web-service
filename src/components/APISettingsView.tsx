@@ -1,5 +1,8 @@
 "use client";
 import React, { useState, useEffect } from "react";
+import { useToast } from "@/components/Toast";
+import { useTranslation } from "@/lib/i18n/LocaleContext";
+import { friendlyError } from "@/lib/friendlyError";
 
 interface AIConfig {
     id: string;
@@ -12,6 +15,8 @@ interface AIConfig {
 }
 
 export default function APISettingsView() {
+    const { t } = useTranslation();
+    const { showToast, toastNode } = useToast();
     const [configs, setConfigs] = useState<AIConfig[]>([]);
     const [loading, setLoading] = useState(true);
     const [submitting, setSubmitting] = useState(false);
@@ -45,11 +50,11 @@ export default function APISettingsView() {
 
     const handleSubmit = async () => {
         if (!form.apiKey && !editingId) {
-            alert("Please provide an API Key");
+            showToast(t("errors.saveFailed"), "error");
             return;
         }
         if (!form.model || !form.label) {
-            alert("Please fill all fields");
+            showToast(t("errors.saveFailed"), "error");
             return;
         }
         setSubmitting(true);
@@ -66,11 +71,12 @@ export default function APISettingsView() {
                 setForm({ provider: "gemini", model: "gemini-2.5-flash", apiKey: "", label: "" });
                 setEditingId(null);
                 await fetchSettings();
+                showToast(t("common.success"), "success");
             } else {
-                alert(`Failed to ${action} configuration`);
+                showToast(t("errors.saveFailed"), "error");
             }
         } catch (e) {
-            alert("Error saving configuration");
+            showToast(friendlyError(e, t, { context: "api-settings-save", fallbackKey: "errors.saveFailed" }), "error");
         } finally {
             setSubmitting(false);
         }
@@ -105,7 +111,7 @@ export default function APISettingsView() {
                 await fetchSettings();
             }
         } catch (e) {
-            alert("Error removing config");
+            showToast(friendlyError(e, t, { context: "api-settings-remove", fallbackKey: "errors.saveFailed" }), "error");
         } finally {
             setSubmitting(false);
         }
@@ -123,7 +129,7 @@ export default function APISettingsView() {
                 await fetchSettings();
             }
         } catch (e) {
-            alert("Error updating config status");
+            showToast(friendlyError(e, t, { context: "api-settings-toggle", fallbackKey: "errors.saveFailed" }), "error");
         } finally {
             setSubmitting(false);
         }
@@ -131,6 +137,7 @@ export default function APISettingsView() {
 
     return (
         <div className="max-w-4xl space-y-8 animate-in fade-in slide-in-from-right-5 duration-700">
+            {toastNode}
             <div className="bg-white dark:bg-slate-900 p-10 rounded-[2.5rem] border border-slate-200 dark:border-slate-800 shadow-sm relative overflow-hidden">
                 <div className="absolute top-0 right-0 p-8">
                     <div className="flex items-center gap-2 bg-emerald-500/10 text-emerald-500 px-3 py-1.5 rounded-full">

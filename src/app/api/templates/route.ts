@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { fail, ErrorCode } from "@/lib/apiResponse";
 
 
 // แม่แบบมาตรฐาน (Global Templates)
@@ -100,7 +101,7 @@ export async function GET(request: NextRequest) {
     const userId = searchParams.get("userId");
 
     if (!userId) {
-        return NextResponse.json({ error: "Missing user ID" }, { status: 400 });
+        return fail(ErrorCode.MISSING_FIELDS, { context: "templates" });
     }
 
     try {
@@ -112,23 +113,39 @@ export async function GET(request: NextRequest) {
         // รวม Global Templates เข้าไปดัวย
         return NextResponse.json([...GLOBAL_TEMPLATES, ...userTemplates.results]);
     } catch (error: any) {
-        return NextResponse.json({ error: error.message }, { status: 500 });
+        return fail(ErrorCode.SERVER_ERROR, { detail: error, context: "templates" });
     }
 }
 
-// บันทึก Template ใหม่
+// Save or overwrite a template. When `id` is provided, UPDATE the existing
+// row (overwrite-in-place save); otherwise INSERT a new row. The ownership
+// check on UPDATE prevents one user from clobbering another user's template
+// by guessing IDs.
 export async function POST(request: NextRequest) {
     try {
-        const body = (await request.json()) as { userId: string; name: string; fields: any };
-        const { userId, name, fields } = body;
+        const body = (await request.json()) as { userId: string; name: string; fields: any; id?: string };
+        const { userId, name, fields, id: providedId } = body;
 
         if (!userId || !name || !fields) {
-            return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
+            return fail(ErrorCode.MISSING_FIELDS, { context: "templates-save" });
         }
 
         const { env } = await getCloudflareContext();
-        const id = crypto.randomUUID();
 
+        if (providedId) {
+            const result = await env.DB.prepare(
+                "UPDATE templates SET name = ?, fields_json = ? WHERE id = ? AND user_id = ?"
+            )
+                .bind(name, JSON.stringify(fields), providedId, userId)
+                .run();
+            const changed = (result as any)?.meta?.changes ?? 0;
+            if (changed === 0) {
+                return fail(ErrorCode.NOT_FOUND, { context: "templates-update" });
+            }
+            return NextResponse.json({ success: true, id: providedId, updated: true });
+        }
+
+        const id = crypto.randomUUID();
         await env.DB.prepare(
             "INSERT INTO templates (id, user_id, name, fields_json) VALUES (?, ?, ?, ?)"
         )
@@ -137,7 +154,7 @@ export async function POST(request: NextRequest) {
 
         return NextResponse.json({ success: true, id });
     } catch (error: any) {
-        return NextResponse.json({ error: error.message }, { status: 500 });
+        return fail(ErrorCode.SERVER_ERROR, { detail: error, context: "templates" });
     }
 }
 
@@ -148,7 +165,7 @@ export async function DELETE(request: NextRequest) {
     const userId = searchParams.get("userId");
 
     if (!id || !userId) {
-        return NextResponse.json({ error: "Missing ID or user ID" }, { status: 400 });
+        return fail(ErrorCode.MISSING_FIELDS, { context: "templates-delete" });
     }
 
     try {
@@ -159,6 +176,6 @@ export async function DELETE(request: NextRequest) {
 
         return NextResponse.json({ success: true });
     } catch (error: any) {
-        return NextResponse.json({ error: error.message }, { status: 500 });
+        return fail(ErrorCode.SERVER_ERROR, { detail: error, context: "templates" });
     }
 }

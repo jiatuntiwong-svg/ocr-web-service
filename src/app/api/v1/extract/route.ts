@@ -1,6 +1,10 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { generateWithAI, getActiveAIConfigs } from "@/lib/ai-handler";
+import { logAiUsage } from "@/lib/ai-usage";
+import { loadFeatureFlags, isFeatureEnabled } from "@/lib/tier-config";
+import { ok, fail, ErrorCode } from "@/lib/apiResponse";
+import { verifyPassword, hashPassword, isHashed } from "@/lib/passwordHash";
 
 export async function POST(req: NextRequest) {
     try {
@@ -12,33 +16,59 @@ export async function POST(req: NextRequest) {
         const selectedModelId = (formData.get("modelId") as string) || "";
 
         if (!email || !password || !file) {
-            return NextResponse.json({ error: "Missing required fields: email, password, file" }, { status: 400 });
+            return fail(ErrorCode.MISSING_FIELDS, { context: "v1-extract" });
         }
 
         const { env } = await getCloudflareContext();
         if (!env?.DB) {
-            return NextResponse.json({ error: "Database not configured" }, { status: 500 });
+            return fail(ErrorCode.SERVER_ERROR, { detail: "no DB binding", context: "v1-extract" });
         }
 
         // 1. Authenticate User and Check Admin Role
-        const user = await env.DB.prepare(
-            "SELECT id, role, credits_remaining, extra_credits, plan FROM users WHERE email = ? AND password = ? LIMIT 1"
+        const userRow = await env.DB.prepare(
+            "SELECT id, role, credits_remaining, extra_credits, plan, password FROM users WHERE email = ? LIMIT 1"
         )
-            .bind(email, password)
-            .first<{ id: string; role: string; credits_remaining: number; extra_credits: number; plan: string }>();
+            .bind(email)
+            .first<{ id: string; role: string; credits_remaining: number; extra_credits: number; plan: string; password: string }>();
 
-        if (!user) {
-            return NextResponse.json({ error: "Invalid credentials" }, { status: 401 });
+        if (!userRow || !(await verifyPassword(password, userRow.password))) {
+            return fail(ErrorCode.UNAUTHORIZED, { context: "v1-extract" });
         }
 
+        // One-way migration: rewrite legacy plaintext as a real hash on first
+        // successful auth. Best-effort — failure here mustn't block the request.
+        if (!isHashed(userRow.password)) {
+            try {
+                const newHash = await hashPassword(password);
+                await env.DB.prepare("UPDATE users SET password = ? WHERE id = ?").bind(newHash, userRow.id).run();
+            } catch {}
+        }
+
+        const user = {
+            id: userRow.id,
+            role: userRow.role,
+            credits_remaining: userRow.credits_remaining,
+            extra_credits: userRow.extra_credits,
+            plan: userRow.plan,
+        };
+
         if (user.role !== "admin") {
-            return NextResponse.json({ error: "Access denied. Only administrators can use this API currently." }, { status: 403 });
+            return fail(ErrorCode.FEATURE_DISABLED, { detail: "admin-only API", context: "v1-extract" });
+        }
+
+        // Feature gate — Public API must be enabled for this user's tier.
+        const featureFlags = await loadFeatureFlags(env);
+        if (!isFeatureEnabled(featureFlags, user.plan, "public_api")) {
+            return fail(ErrorCode.FEATURE_DISABLED, { context: "v1-extract" });
         }
 
         // 2. Check Credits
         const totalAvailable = user.credits_remaining + user.extra_credits;
         if (totalAvailable <= 0) {
-            return NextResponse.json({ error: "Insufficient credits" }, { status: 402 });
+            return fail(ErrorCode.INSUFFICIENT_CREDITS, {
+                vars: { need: 1, have: totalAvailable },
+                context: "v1-extract",
+            });
         }
 
         // 3. Deduct Credits
@@ -55,7 +85,7 @@ export async function POST(req: NextRequest) {
         if (!target) target = finalConfigs[0];
 
         if (!target) {
-            return NextResponse.json({ error: "No AI Configuration available on the server" }, { status: 500 });
+            return fail(ErrorCode.AI_UNAVAILABLE, { context: "v1-extract" });
         }
 
         const matchingKeys = finalConfigs
@@ -75,13 +105,14 @@ export async function POST(req: NextRequest) {
         const base64Data = Buffer.from(arrayBuffer).toString("base64");
         
         const startTime = Date.now();
-        const text = await generateWithAI({
+        const ai = await generateWithAI({
             provider: target.provider,
             model: target.model,
             prompt,
             image: { data: base64Data, mimeType: file.type || "image/png" },
             apiKeys: matchingKeys
         });
+        const text = ai.text;
 
         const processingTimeMs = Date.now() - startTime;
 
@@ -90,18 +121,26 @@ export async function POST(req: NextRequest) {
             const match = text.match(/\{[\s\S]*\}/);
             if (match) extracted = JSON.parse(match[0]);
         } catch (e) {
-            return NextResponse.json({ error: "AI returned invalid format", raw: text }, { status: 502 });
+            console.error("[v1/extract] AI parse failed:", (e as any)?.message, "raw:", text?.slice(0, 500));
+            return fail(ErrorCode.AI_FAILED, { detail: e, context: "v1-extract-parse" });
         }
 
+        // Record AI token usage for the admin cost dashboard.
+        await logAiUsage(env, {
+            userId: user.id, fn: "api_extract",
+            provider: target.provider, model: target.model,
+            inputTokens: ai.usage.inputTokens, outputTokens: ai.usage.outputTokens,
+            fileName: file.name,
+        });
+
         // 6. Return the extracted data directly (Synchronous)
-        return NextResponse.json({
+        return ok({
             success: true,
             processing_time_ms: processingTimeMs,
             extracted_data: extracted
         });
 
     } catch (error: any) {
-        console.error("[V1 Extract POST] error:", error);
-        return NextResponse.json({ error: error.message || "Internal server error" }, { status: 500 });
+        return fail(ErrorCode.PROCESSING_FAILED, { detail: error, context: "v1-extract" });
     }
 }

@@ -18,7 +18,10 @@ const nextConfig: NextConfig = {
 		config.resolve.alias.canvas = false;
 		return config;
 	},
-	turbopack: {},
+	// NOTE: do NOT enable turbopack for production build — its chunk runtime
+	// is not compatible with Cloudflare Workers via OpenNext (manifests as
+	// "Failed to load chunk server/chunks/ssr/..." at runtime). next dev can
+	// still use Turbopack; the prod build must use webpack.
 };
 
 export default nextConfig;

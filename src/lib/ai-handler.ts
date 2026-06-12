@@ -35,7 +35,19 @@ export interface AIProviderRequest {
     apiKeys: string[];
 }
 
-export async function generateWithAI(req: AIProviderRequest): Promise<string> {
+// Token usage returned alongside the AI text so callers can record the real
+// input/output token cost per request (for the admin AI-usage dashboard).
+export interface TokenUsage {
+    inputTokens: number;
+    outputTokens: number;
+}
+
+export interface AIResult {
+    text: string;
+    usage: TokenUsage;
+}
+
+export async function generateWithAI(req: AIProviderRequest): Promise<AIResult> {
     const { provider, model, prompt, image, images, apiKeys } = req;
     let lastError = null;
     const finalImages = images || (image ? [image] : []);
@@ -60,19 +72,33 @@ export async function generateWithAI(req: AIProviderRequest): Promise<string> {
     throw new Error(`All keys failed for ${provider}. Last error: ${lastError?.message}`);
 }
 
-async function generateGemini(key: string, modelName: string, prompt: string, images: { data: string; mimeType: string }[]) {
+async function generateGemini(key: string, modelName: string, prompt: string, images: { data: string; mimeType: string }[]): Promise<AIResult> {
     const genAI = new GoogleGenerativeAI(key);
-    const model = genAI.getGenerativeModel({ model: modelName });
+    // temperature:0 + top_p:1 → deterministic-ish for structured extraction.
+    // Default Gemini temperature is ~1.0 which made compare results vary
+    // between runs on the same input (user-reported inconsistency).
+    const model = genAI.getGenerativeModel({
+        model: modelName,
+        generationConfig: { temperature: 0, topP: 1 },
+    });
     const imageParts = images.map(img => ({ inlineData: img }));
     const result = await model.generateContent([
         prompt,
         ...imageParts,
     ]);
     const response = await result.response;
-    return response.text();
+    const um: any = response.usageMetadata || {};
+    return {
+        text: response.text(),
+        usage: {
+            inputTokens: um.promptTokenCount || 0,
+            // thinking tokens (gemini 2.5) are billed as output
+            outputTokens: (um.candidatesTokenCount || 0) + (um.thoughtsTokenCount || 0),
+        },
+    };
 }
 
-async function generateOpenAI(key: string, modelName: string, prompt: string, images: { data: string; mimeType: string }[]) {
+async function generateOpenAI(key: string, modelName: string, prompt: string, images: { data: string; mimeType: string }[]): Promise<AIResult> {
     const contentPayload: any[] = [{ type: "text", text: prompt }];
     images.forEach(img => {
         contentPayload.push({ type: "image_url", image_url: { url: `data:${img.mimeType};base64,${img.data}` } });
@@ -92,15 +118,22 @@ async function generateOpenAI(key: string, modelName: string, prompt: string, im
                     content: contentPayload
                 }
             ],
+            temperature: 0,
             response_format: { type: "json_object" }
         })
     });
     const data = await res.json() as any;
     if (!res.ok) throw new Error(data.error?.message || "OpenAI Error");
-    return data.choices[0].message.content;
+    return {
+        text: data.choices[0].message.content,
+        usage: {
+            inputTokens: data.usage?.prompt_tokens || 0,
+            outputTokens: data.usage?.completion_tokens || 0,
+        },
+    };
 }
 
-async function generateOpenRouter(key: string, modelName: string, prompt: string, images: { data: string; mimeType: string }[]) {
+async function generateOpenRouter(key: string, modelName: string, prompt: string, images: { data: string; mimeType: string }[]): Promise<AIResult> {
     const contentPayload: any[] = [{ type: "text", text: prompt }];
     images.forEach(img => {
         contentPayload.push({ type: "image_url", image_url: { url: `data:${img.mimeType};base64,${img.data}` } });
@@ -121,10 +154,17 @@ async function generateOpenRouter(key: string, modelName: string, prompt: string
                     role: "user",
                     content: contentPayload
                 }
-            ]
+            ],
+            temperature: 0
         })
     });
     const data = await res.json() as any;
     if (!res.ok) throw new Error(data.error?.message || "OpenRouter Error");
-    return data.choices[0].message.content;
+    return {
+        text: data.choices[0].message.content,
+        usage: {
+            inputTokens: data.usage?.prompt_tokens || 0,
+            outputTokens: data.usage?.completion_tokens || 0,
+        },
+    };
 }

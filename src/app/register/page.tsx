@@ -2,9 +2,15 @@
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { useTranslation } from "@/lib/i18n/LocaleContext";
+import { apiError } from "@/lib/friendlyError";
+import { fetchJson } from "@/lib/fetchJson";
+import { evaluatePassword } from "@/lib/passwordStrength";
+import { ErrorCode } from "@/lib/errorCodes";
 
 export default function RegisterPage() {
     const router = useRouter();
+    const { t } = useTranslation();
     const [name, setName] = useState("");
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
@@ -12,6 +18,8 @@ export default function RegisterPage() {
     const [error, setError] = useState("");
     const [showPassword, setShowPassword] = useState(false);
     const [mounted, setMounted] = useState(false);
+
+    const pwStrength = evaluatePassword(password);
 
     useEffect(() => {
         setMounted(true);
@@ -27,41 +35,35 @@ export default function RegisterPage() {
     const handleRegister = async (e: React.FormEvent) => {
         e.preventDefault();
         setError("");
-        
-        if (password.length < 6) {
-            setError("Password must be at least 6 characters long.");
+
+        if (!pwStrength.valid) {
+            setError(apiError(ErrorCode.WEAK_PASSWORD, undefined, t));
             return;
         }
 
         setLoading(true);
-        try {
-            const res = await fetch("/api/auth/register", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ name, email, password }),
-            });
-            const data = await res.json() as { success?: boolean; error?: string };
-            if (data.success) {
-                // Instantly log them in after registration
-                const loginRes = await fetch("/api/auth", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ email, password }),
-                });
-                const loginData = await loginRes.json() as { success?: boolean; user?: any };
-                if (loginData.success && loginData.user) {
-                    localStorage.setItem("ocr_user", JSON.stringify(loginData.user));
-                    router.replace("/");
-                } else {
-                    router.replace("/login");
-                }
-            } else {
-                setError(data.error || "Registration failed");
-            }
-        } catch {
-            setError("Connection error. Please try again.");
-        } finally {
+        const res = await fetchJson("/api/auth/register", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, email, password }),
+        });
+        if (!res.ok) {
             setLoading(false);
+            setError(apiError(res.code, res.vars, t));
+            return;
+        }
+        // Auto sign-in after registration.
+        const loginRes = await fetchJson<{ user: any }>("/api/auth", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email, password }),
+        });
+        setLoading(false);
+        if (loginRes.ok && loginRes.user) {
+            localStorage.setItem("ocr_user", JSON.stringify(loginRes.user));
+            router.replace("/");
+        } else {
+            router.replace("/login");
         }
     };
 
@@ -151,7 +153,7 @@ export default function RegisterPage() {
                                     onChange={e => setPassword(e.target.value)}
                                     placeholder="••••••••"
                                     required
-                                    minLength={6}
+                                    minLength={8}
                                     className="w-full pl-11 pr-12 py-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm font-semibold text-slate-900 dark:text-white placeholder:text-slate-400 placeholder:font-normal focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
                                 />
                                 <button
@@ -165,12 +167,48 @@ export default function RegisterPage() {
                                     }
                                 </button>
                             </div>
+
+                            {/* Strength meter + checklist */}
+                            {password.length > 0 && (
+                                <div className="mt-2 space-y-2 animate-in fade-in slide-in-from-top-1 duration-200">
+                                    <div className="flex gap-1.5">
+                                        {[1, 2, 3].map(level => (
+                                            <div
+                                                key={level}
+                                                className={`h-1 flex-1 rounded-full transition-colors ${pwStrength.score >= level
+                                                    ? pwStrength.score === 1 ? "bg-rose-500"
+                                                        : pwStrength.score === 2 ? "bg-amber-500"
+                                                            : "bg-emerald-500"
+                                                    : "bg-slate-200 dark:bg-slate-700"
+                                                    }`}
+                                            />
+                                        ))}
+                                    </div>
+                                    <ul className="text-[11px] space-y-1 px-1">
+                                        {[
+                                            { ok: pwStrength.checks.length, label: "ความยาวอย่างน้อย 8 ตัวอักษร" },
+                                            { ok: pwStrength.checks.hasLower, label: "มีตัวอักษรพิมพ์เล็ก (a–z)" },
+                                            { ok: pwStrength.checks.hasUpper, label: "มีตัวอักษรพิมพ์ใหญ่ (A–Z)" },
+                                            { ok: pwStrength.checks.hasNumberOrSymbol, label: "มีตัวเลขหรืออักษรพิเศษ" },
+                                        ].map((rule, i) => (
+                                            <li key={i} className={`flex items-center gap-2 font-semibold ${rule.ok ? "text-emerald-600 dark:text-emerald-400" : "text-slate-400"}`}>
+                                                <svg className="w-3 h-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                                                    {rule.ok
+                                                        ? <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                                                        : <circle cx="12" cy="12" r="9" strokeWidth={2} />}
+                                                </svg>
+                                                {rule.label}
+                                            </li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            )}
                         </div>
 
                         {/* Submit */}
                         <button
                             type="submit"
-                            disabled={loading || !name || !email || password.length < 6}
+                            disabled={loading || !name || !email || !pwStrength.valid}
                             className="w-full py-4 mt-2 rounded-xl bg-blue-600 hover:bg-blue-500 active:scale-[0.98] text-white font-black text-[11px] uppercase tracking-[0.2em] transition-all duration-300 shadow-xl shadow-blue-500/20 flex items-center justify-center gap-3 disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:bg-blue-600 disabled:active:scale-100"
                         >
                             {loading ? (
