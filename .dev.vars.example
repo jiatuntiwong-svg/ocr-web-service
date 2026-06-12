@@ -1,0 +1,48 @@
+# Local development env vars for `wrangler dev` / `npm run dev:cf`.
+#
+# COPY THIS FILE TO `.dev.vars` AND FILL IN YOUR OWN KEYS.
+# `.dev.vars` is gitignored — never commit real secrets.
+#
+# Production secrets are stored in Cloudflare:
+#   npx wrangler secret put <NAME>
+# These local values are only used by the local dev runtime.
+
+# ─── Environment marker ──────────────────────────────────────────────────────
+NEXTJS_ENV=development
+
+
+# ─── Google Gemini AI ────────────────────────────────────────────────────────
+# Get a key at https://aistudio.google.com/app/apikey (free tier available).
+# The app picks a model at runtime — Gemini Flash-Lite is the cheap default,
+# Pro / 3.5 Flash are configurable through the Admin → API Settings UI.
+GEMINI_API_KEY=your-gemini-api-key-here
+
+
+# ─── Stripe (only needed if you touch billing flows) ─────────────────────────
+# Use TEST mode keys for local dev (`sk_test_…`).
+# Dashboard: https://dashboard.stripe.com/test/apikeys
+STRIPE_SECRET_KEY=sk_test_your-stripe-test-secret
+
+# Webhook signing secret — only needed if you run `stripe listen` against
+# your local server to test webhook delivery. Otherwise leave blank.
+# Generate via: stripe listen --forward-to localhost:3000/api/webhook/stripe
+STRIPE_WEBHOOK_SECRET=whsec_your-webhook-secret
+
+# Stripe Price IDs for the credit packs / subscription tiers. Create products
+# in your Stripe test dashboard, then paste their price IDs here.
+STRIPE_PRICE_STARTER=price_your-starter-tier
+STRIPE_PRICE_PRO=price_your-pro-tier
+STRIPE_PRICE_ENTERPRISE=price_your-enterprise-tier
+
+
+# ─── Future: Email (Email verification + Forgot password) ────────────────────
+# Not used yet — backlogged. Add when implementing email verification.
+# Decision: provider TBD (Resend recommended for ease).
+# RESEND_API_KEY=re_your-resend-key
+
+
+# ─── Future: Google OAuth (Sign-In with Google + Drive Picker) ───────────────
+# Not used yet — backlogged. Add when implementing Google login.
+# Both reuse the same OAuth client (different scopes per flow).
+# GOOGLE_CLIENT_ID=your-google-client-id
+# GOOGLE_CLIENT_SECRET=your-google-client-secret
