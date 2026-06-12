@@ -307,7 +307,133 @@ The owner will accept the Docker version when **all** of these are true:
 
 ---
 
-## 9. Out of scope for this migration
+## 9. Public API hardening (in scope — fold into migration work)
+
+`/api/v1/extract` is the only public-facing API endpoint today. It works
+behind the admin-only gate but is **NOT** safe to open to external customers
+in its current shape. The owner wants it customer-ready after the Docker
+migration. Bundle these fixes into the same sprint — they touch the same
+files the migration team will be refactoring anyway.
+
+### 9.1 Current shape (auditable in `src/app/api/v1/extract/route.ts`)
+
+- **Auth:** `email` + `password` sent in every form-data body. Password is
+  verified against the PBKDF2 hash and silently rehashed on success.
+- **Access gate:** admin role only + tier feature flag `public_api`.
+- **Credit charge:** deducted **before** the AI call, in two separate
+  non-atomic UPDATEs (`credits_remaining` first, then `extra_credits`).
+- **Response:** synchronous JSON (AI runs inline, can hit Worker 30s limit).
+- **Error format:** `fail()` from `src/lib/apiResponse.ts` with `detail`
+  echoing the raw error (potentially leaking internals).
+- **No rate limit, no idempotency key, no request-size guard, no audit log,
+  no CORS, no SDK, no OpenAPI doc.**
+- Prompt is hardcoded Thai-first (see line 96-102 of the route).
+
+### 9.2 Critical fixes (MUST land before opening to external customers)
+
+| # | Issue | Suggested fix |
+|--|--|--|
+| 1 | Email + password auth on every call | Add `api_keys` table (id, user_id, prefix, hash, scopes, created_at, last_used_at, revoked_at). Accept `Authorization: Bearer sk_xxx`. Hash the secret half (don't store plaintext). Add Settings UI for users to create / revoke. |
+| 2 | Credit charged before AI call | Reuse the `/api/upload` pattern: pre-authorize, run AI, **then** atomic charge on success. Failure path = no charge. |
+| 3 | Non-atomic credit deduction (race) | Replace with the single-statement guarded `UPDATE … WHERE … >= ? RETURNING …` already used by upload. See §5 "atomic credit charge". |
+| 4 | No rate limit | Per-API-key sliding window. Recommend storing counters in Redis (post-migration) with TTL = window. Limits per tier: e.g. Pro = 60/min / 1000/day. Return `X-RateLimit-Remaining` / `X-RateLimit-Reset`. |
+| 5 | No request-size guard | Reject `file.size > N` before reading. Tier-dependent cap (e.g. Pro 10MB, Enterprise 50MB). Return `413 Payload Too Large`. |
+
+### 9.3 High-priority fixes (should land before public launch)
+
+| # | Issue | Suggested fix |
+|--|--|--|
+| 6 | Synchronous timeout on large files | Add async sibling endpoint: `POST /api/v1/extract/async` returns `{ jobId }`, results retrieved via `GET /api/v1/jobs/{jobId}`. Background work via BullMQ on Redis (already in migration scope). Sync stays as default for ≤25s jobs. |
+| 7 | Errors leak internals | Public-API error payload = `{ code, message }` only. Log full detail server-side keyed by `request_id`. |
+| 8 | Access gating policy | Decide: admin-managed API keys (current behavior, safer) vs. tier-based self-serve (Pro+ can create keys). Owner leans toward tier-based but wants the Skill system shipped first. |
+| 9 | No audit trail per request | Insert into a new `api_calls` table: `id`, `api_key_id`, `route`, `ip`, `user_agent`, `request_id`, `status`, `tokens_in/out`, `credits_charged`, `created_at`. |
+| 10 | Missing rate / quota response headers | Add `X-Credits-Remaining`, `X-RateLimit-*`, `X-Request-Id` to every response. |
+| 11 | CORS undefined | Decide policy: server-to-server only (no `Access-Control-Allow-*`) OR allow specific origins for browser-direct calls. Owner default = server-to-server only. |
+
+### 9.4 Polish (nice-to-have, after critical + high)
+
+| # | Issue | Suggested fix |
+|--|--|--|
+| 12 | No OpenAPI / Swagger | Ship `openapi.yaml` covering `/api/v1/extract` + future async sibling. Optional: host Swagger UI at `/api/v1/docs`. |
+| 13 | No SDKs | At minimum, a `curl` snippet in the API page + a Node + Python example. Full SDK can wait. |
+| 14 | No user-side usage dashboard | Add a "API Usage" section to the user's Settings view (mirrors `/admin/ai-usage`, scoped to their own keys). |
+| 15 | Hardcoded Thai prompt | Accept an optional `prompt_language` parameter (`th` \| `en`) and swap the prompt template; default to user's locale from `users.locale` (new column, default `th`). |
+| 16 | Versioning strategy | Document the contract: `/v1/*` is frozen; new fields are additive; breaking changes ship under `/v2/*`. Sunset `v1` with 6-month notice. |
+
+### 9.5 Data model additions (apply in the Postgres migration)
+
+```sql
+-- API key authentication for /api/v1/* endpoints
+CREATE TABLE api_keys (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  name TEXT NOT NULL,                -- "Production backend", "Test laptop", etc.
+  prefix TEXT NOT NULL,              -- first 8 chars shown in UI (e.g. "sk_a1b2c3")
+  secret_hash TEXT NOT NULL,         -- PBKDF2 of the full secret half
+  scopes TEXT NOT NULL DEFAULT 'extract', -- comma-separated; future: 'compare', 'admin'
+  last_used_at TIMESTAMPTZ,
+  revoked_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX idx_api_keys_user ON api_keys(user_id, revoked_at);
+CREATE INDEX idx_api_keys_prefix ON api_keys(prefix) WHERE revoked_at IS NULL;
+
+-- Per-request audit trail
+CREATE TABLE api_calls (
+  id TEXT PRIMARY KEY,                -- doubles as the X-Request-Id header
+  api_key_id TEXT REFERENCES api_keys(id),
+  user_id TEXT REFERENCES users(id),
+  route TEXT NOT NULL,                -- e.g. '/api/v1/extract'
+  method TEXT NOT NULL,
+  ip TEXT,
+  user_agent TEXT,
+  status_code INTEGER,
+  tokens_in INTEGER DEFAULT 0,
+  tokens_out INTEGER DEFAULT 0,
+  credits_charged INTEGER DEFAULT 0,
+  duration_ms INTEGER,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX idx_api_calls_key_time ON api_calls(api_key_id, created_at DESC);
+CREATE INDEX idx_api_calls_user_time ON api_calls(user_id, created_at DESC);
+```
+
+### 9.6 Acceptance for the API hardening track
+
+These rows go into the [`BEHAVIOR_REFERENCE.md`](BEHAVIOR_REFERENCE.md) sign-off
+matrix once the API hardening work is done:
+
+- `POST /api/v1/extract` with `Authorization: Bearer sk_…` works; with the
+  old `email`+`password` form returns `401 UNAUTHORIZED`.
+- Revoked API key returns `401 UNAUTHORIZED` immediately on next call.
+- 10 parallel calls from the same key cannot overdraw credits.
+- AI failure path leaves credits untouched (verify by simulating a bad
+  Gemini key).
+- Request-size limit returns `413` without spending a credit.
+- Rate limit returns `429` with `X-RateLimit-Reset` header.
+- Error responses do not contain stack traces or file paths.
+- `X-Request-Id` is present on every response and matches an `api_calls`
+  row in Postgres.
+
+### 9.7 Sequence inside the migration sprint
+
+Suggested order — fold into the relevant migration days from §0 / Week plan:
+
+1. Build the `api_keys` table + middleware first (Day 3-4 of Week 1, alongside
+   the abstraction layer work). Behind a feature flag — old email+password
+   still works during transition.
+2. Atomic credit + refund (Day 4 of Week 1, while refactoring DB calls).
+3. Rate limit middleware (Day 6, alongside Redis setup for queue + cache).
+4. Size guard + safe error format (Day 7, before spike review).
+5. Async endpoint + audit log (Week 2, once BullMQ is online).
+6. OpenAPI docs + SDK snippets (Week 2 polish).
+
+This keeps the API hardening **diff-adjacent** to the migration work so the
+team isn't context-switching between two unrelated patches.
+
+---
+
+## 10. Out of scope for this migration
 
 - Skill system (see [`PENDING_FEATURES_BACKLOG.md`](PENDING_FEATURES_BACKLOG.md))
 - LINE OA integration (see [`PENDING_LINE_AND_INTEGRATIONS_PLAN.md`](PENDING_LINE_AND_INTEGRATIONS_PLAN.md))
@@ -319,7 +445,7 @@ These can be added after the Docker stack is stable in production.
 
 ---
 
-## 10. Where to start
+## 11. Where to start
 
 1. Read [`README.md`](../README.md) and [`CONTRIBUTING.md`](../CONTRIBUTING.md).
 2. Walk the live app (production URL above) and follow the user journeys

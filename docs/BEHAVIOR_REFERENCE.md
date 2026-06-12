@@ -157,13 +157,41 @@ Test files:
 
 ### 4.8 Public API (`/api/v1/extract`)
 
-| Step | Expected behavior | Notes |
+> ⚠️ **Important:** The current API shape is **NOT** the target customer-
+> facing shape. See [`MIGRATION.md §9`](MIGRATION.md#9-public-api-hardening-in-scope--fold-into-migration-work)
+> for the full hardening backlog. The rows below describe the **current**
+> behavior on CF — the Docker team is expected to **replace** much of this
+> (email+password auth, non-atomic charge, sync-only response) with the
+> hardened version. The two CF-passes / Docker-passes columns in §6 are
+> split into "current shape" and "hardened shape" for that reason.
+
+#### Current shape (CF, baseline to understand the code)
+
+| Step | Current behavior | Notes |
 |--|--|--|
-| POST multipart with `email`, `password`, `file`, `fields` | OCR extraction returned as JSON | Admin role required |
-| Wrong password | `401 UNAUTHORIZED` |  |
-| Non-admin caller | `403 FEATURE_DISABLED` |  |
+| POST multipart with `email`, `password`, `file`, `fields` | OCR extraction returned as JSON | Admin role required + tier feature flag `public_api` enabled |
+| Wrong password | `401 UNAUTHORIZED` | PBKDF2 verify; legacy plaintext rehashed on success |
+| Non-admin caller | `403 FEATURE_DISABLED` (with `detail: "admin-only API"`) | Hard gate; user-tier callers never reach AI |
 | Insufficient credits | `402 INSUFFICIENT_CREDITS` |  |
-| Successful extraction | Credit deducted + response includes extracted fields | Same pricing as web OCR |
+| Successful extraction | 1 credit deducted **before** AI call (race-unsafe) + response includes `extracted_data` | Charge happens in two separate UPDATEs |
+| AI call fails | Credit was already deducted → **user loses the credit** | Anti-pattern, see §9.2 of MIGRATION |
+| Synchronous response | Returns within Worker CPU limit (~30s); times out on large files | No async option today |
+| Hardcoded Thai prompt | Defaults to Thai field names if `fields` param omitted | See route line 15 |
+
+#### Hardened shape (Docker target — see MIGRATION.md §9 for details)
+
+| Step | Target behavior | Notes |
+|--|--|--|
+| `Authorization: Bearer sk_…` | API key replaces email+password in every call | New `api_keys` table |
+| Revoked key | `401 UNAUTHORIZED` on next call | `revoked_at` checked at lookup |
+| Rate limit hit | `429` with `X-RateLimit-Reset` header | Sliding window per-key in Redis |
+| Request body > size cap | `413 Payload Too Large` | No credit charged |
+| Successful extraction | Credit deducted **after** AI success, atomic UPDATE | Matches `/api/upload` pattern |
+| AI failure | No credit charged | Refund path on partial failure |
+| Async sibling `POST /api/v1/extract/async` | Returns `{ jobId }` immediately; `GET /api/v1/jobs/{id}` polls | BullMQ on Redis |
+| All responses | `X-Credits-Remaining`, `X-RateLimit-*`, `X-Request-Id` headers present | Audit-friendly |
+| Errors | `{ code, message }` only — never stack traces or paths | Full detail in server logs keyed by request_id |
+| Audit | Every call inserts a row into `api_calls` table | Trace abuse and support cases |
 
 ---
 
@@ -224,6 +252,17 @@ Owner ticks each row after running on Docker build. Sign + date at bottom.
 | 28 | `docker-compose down && up` preserves data | ☐ | ☐ | Docker-only |
 | 29 | Mobile responsive (auto-collapse NavRail on <1024px) | ☐ | ☐ |  |
 | 30 | Th + En locale toggle works | ☐ | ☐ |  |
+| **API Hardening (see MIGRATION.md §9)** |  |  |  |  |
+| 31 | `POST /api/v1/extract` with `Authorization: Bearer sk_…` succeeds | n/a | ☐ | Docker-only — new auth model |
+| 32 | Old email+password form returns 401 (or behind feature flag) | ☐ | ☐ | Owner picks transition policy |
+| 33 | Revoked API key returns 401 immediately | n/a | ☐ |  |
+| 34 | 10 parallel calls from same key cannot overdraw credits | ☐ | ☐ | Atomic charge |
+| 35 | AI failure leaves credits untouched (refund/no-charge path) | ☐ | ☐ | Simulate with bad Gemini key |
+| 36 | Request > size cap returns 413 without spending a credit | n/a | ☐ |  |
+| 37 | Rate limit returns 429 with `X-RateLimit-Reset` | n/a | ☐ |  |
+| 38 | Error responses do not contain stack traces / file paths | ☐ | ☐ | Owner checks any error response body |
+| 39 | `X-Request-Id` on every response + matching `api_calls` row | n/a | ☐ |  |
+| 40 | Async sibling endpoint completes large jobs without timeout | n/a | ☐ | Test with multi-page PDF |
 
 ---
 
