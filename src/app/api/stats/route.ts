@@ -3,19 +3,27 @@ import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { PLAN_LIMITS } from "@/lib/devUsers";
 import { loadFeatureFlags, resolveFeatures } from "@/lib/tier-config";
 import { fail, ErrorCode } from "@/lib/apiResponse";
+import { requireUser, ensureCanActAs } from "@/lib/auth/guards";
 
 
 const getPlanLimit = (plan?: string) => PLAN_LIMITS[plan?.toLowerCase() ?? ""] ?? 50;
 
 export async function GET(req: NextRequest) {
     try {
-        const { searchParams } = new URL(req.url);
-        const userId = searchParams.get("userId");
-        const plan = searchParams.get("plan") || "Free";
+        const auth = await requireUser(req);
+        if (auth instanceof Response) return auth;
 
-        if (!userId) {
-            return fail(ErrorCode.MISSING_FIELDS, { context: "stats" });
-        }
+        const { searchParams } = new URL(req.url);
+        // userId in the query is honoured only when it matches the session
+        // (or the caller is admin). The old code took whatever the client
+        // sent — that was the IDOR documented in SECURITY_AUDIT §2.
+        const requested = searchParams.get("userId") ?? auth.id;
+        const cross = ensureCanActAs(auth, requested);
+        if (cross) return cross;
+        const userId = requested;
+        // plan is also read from the session, NOT the query, so a caller
+        // can't bump their feature flags by spoofing `?plan=Enterprise`.
+        const plan = auth.plan || "Free";
 
         const { env } = await getCloudflareContext();
         let totalDocs = 0;

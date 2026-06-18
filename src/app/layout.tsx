@@ -27,9 +27,17 @@ export default function RootLayout({
 	children: React.ReactNode;
 }>) {
 	return (
-		<html lang="en">
+		<html lang="en" suppressHydrationWarning>
 			<head>
 				<link rel="icon" href="/favicon.svg" type="image/svg+xml"></link>
+				{/* Noto Sans Thai — moved out of globals.css @import so dev Turbopack
+				    doesn't choke on a mid-stylesheet @import rule. */}
+				<link rel="preconnect" href="https://fonts.googleapis.com" />
+				<link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+				<link
+					rel="stylesheet"
+					href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@300;400;500;600;700;800&display=swap"
+				/>
 				<script dangerouslySetInnerHTML={{ __html: themeBootstrap }} />
 			</head>
 			<body className="antialiased">

@@ -2,20 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { ensureAiUsageTable } from "@/lib/ai-usage";
 import { fail, ErrorCode } from "@/lib/apiResponse";
+import { requireAdmin } from "@/lib/auth/guards";
 
 // Admin AI token-usage dashboard API.
 //   GET  → per-function summary + daily breakdown + raw rows + per-model rates
 //   POST → save per-model token rates (USD per 1,000,000 tokens)
-
-function getCaller(req: NextRequest): { id?: string; role?: string } | null {
-    const token = req.cookies.get("session")?.value;
-    if (!token) return null;
-    try {
-        return JSON.parse(decodeURIComponent(escape(atob(token)))) as { id?: string; role?: string };
-    } catch {
-        return null;
-    }
-}
 
 interface ModelRate { input: number; output: number } // USD per 1M tokens
 type RateMap = Record<string, ModelRate>;
@@ -47,9 +38,8 @@ async function loadUsdThb(env: any): Promise<number> {
 }
 
 export async function GET(req: NextRequest) {
-    if (getCaller(req)?.role !== "admin") {
-        return fail(ErrorCode.UNAUTHORIZED, { context: "admin-aiusage" });
-    }
+    const auth = await requireAdmin(req);
+    if (auth instanceof Response) return auth;
     try {
         const { env } = await getCloudflareContext();
         if (!env?.DB) {
@@ -211,9 +201,8 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-    if (getCaller(req)?.role !== "admin") {
-        return fail(ErrorCode.UNAUTHORIZED, { context: "admin-aiusage" });
-    }
+    const auth = await requireAdmin(req);
+    if (auth instanceof Response) return auth;
     try {
         const { env } = await getCloudflareContext();
         if (!env?.DB) return fail(ErrorCode.SERVER_ERROR, { detail: "no DB binding", context: "admin-aiusage" });

@@ -7,6 +7,7 @@
 import { NextRequest } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { ok, fail, ErrorCode } from "@/lib/apiResponse";
+import { requireUser, ensureCanActAs } from "@/lib/auth/guards";
 
 const ALLOWED_KINDS = new Set(["ocr", "compare"]);
 
@@ -14,9 +15,14 @@ const DEFAULT_THRESHOLD = 0.7;
 
 export async function GET(req: NextRequest) {
     try {
+        const auth = await requireUser(req);
+        if (auth instanceof Response) return auth;
+
         const { searchParams } = new URL(req.url);
-        const userId = searchParams.get("userId");
-        if (!userId) return fail(ErrorCode.MISSING_FIELDS, { context: "user-prefs" });
+        const requested = searchParams.get("userId") ?? auth.id;
+        const cross = ensureCanActAs(auth, requested);
+        if (cross) return cross;
+        const userId = requested;
 
         const { env } = await getCloudflareContext();
         if (!env?.DB) return fail(ErrorCode.SERVER_ERROR, { detail: "no DB binding", context: "user-prefs" });
@@ -46,6 +52,9 @@ export async function GET(req: NextRequest) {
 
 export async function PATCH(req: NextRequest) {
     try {
+        const auth = await requireUser(req);
+        if (auth instanceof Response) return auth;
+
         const body = await req.json() as {
             userId?: string;
             // template-default flow (existing)
@@ -55,7 +64,10 @@ export async function PATCH(req: NextRequest) {
             confidenceThreshold?: number;
             blockExportLowConfidence?: boolean;
         };
-        if (!body.userId) return fail(ErrorCode.MISSING_FIELDS, { context: "user-prefs" });
+        const requested = body.userId ?? auth.id;
+        const cross = ensureCanActAs(auth, requested);
+        if (cross) return cross;
+        body.userId = requested;
 
         const { env } = await getCloudflareContext();
         if (!env?.DB) return fail(ErrorCode.SERVER_ERROR, { detail: "no DB binding", context: "user-prefs" });

@@ -9,6 +9,15 @@ import { apiError } from "@/lib/friendlyError";
 import { fetchJson } from "@/lib/fetchJson";
 import { ErrorCode } from "@/lib/errorCodes";
 import { isExcelFile, type ExcelCellRef } from "@/lib/excel-parser";
+import { docxFileToImage } from "@/lib/docx-to-image";
+import { exportOCRBatch, type BatchResult } from "@/lib/exportUtils";
+import {
+    MAX_BATCH_FILES,
+    OCR_BATCH_CONCURRENCY,
+    PER_FILE_TIMEOUT_MS,
+    POLL_INTERVAL_MS,
+    BATCH_UI_THRESHOLD,
+} from "@/lib/ocrBatchConfig";
 import ExcelPreview from "./ExcelPreview";
 import ConfirmDialog from "./ConfirmDialog";
 import { estimateCredits, creditTone } from "@/lib/pricing";
@@ -21,6 +30,8 @@ import {
     type ConfirmReason,
 } from "@/lib/credit-preferences";
 import CreditConfirmDialog from "./CreditConfirmDialog";
+import { useApp } from "@/lib/contexts/AppContext";
+import type { BatchItem } from "@/lib/types/batch";
 
 // ─── Local Types ──────────────────────────────────────────────────────────────
 interface ExtractField { id: string; name: string; type: "text" | "number" | "currency" | "date" | "address" | "email" | "table"; }
@@ -55,6 +66,15 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
     // ─── File & Preview ───
     const [file, setFile] = useState<File | null>(null);
     const [previews, setPreviews] = useState<string[]>([]);
+    // .docx files are flattened into a PNG before upload (mammoth → html2canvas);
+    // the flag lets us show a "converting…" hint over the drop zone while it
+    // happens — large docs can take a couple of seconds.
+    const [converting, setConverting] = useState<"docx" | null>(null);
+    // Preview zoom (per-document, not persisted). Clamped 0.5x..3x with the
+    // same step as Compare's per-slot zoom so the two workspaces feel the same.
+    const [zoom, setZoom] = useState(1);
+    const setZoomClamped = (next: number) =>
+        setZoom(Math.max(0.5, Math.min(3, +next.toFixed(2))));
     const [previewPage, setPreviewPage] = useState(0);
     const dropRef = useRef<HTMLDivElement>(null);
 
@@ -118,6 +138,21 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
         fingerprint: string;
     } | null>(null);
 
+    // ─── Batch (multi-file OCR) ───
+    // The batch path runs in parallel with the existing single-file flow.
+    // When `batchItems` is non-empty the UI switches to a per-file list view
+    // and the runner orchestrates a series of /api/upload + /api/status calls
+    // capped at OCR_BATCH_CONCURRENCY in flight. Each item carries its own
+    // status so a single failure (credit out, AI error) doesn't stall the rest.
+    //
+    // State is hoisted to AppContext (in (app)/layout) so navigating to
+    // /documents and back to /ocr preserves an in-flight or finished batch.
+    const { batchItems, setBatchItems, batchRunning, setBatchRunning } = useApp();
+    const isBatchMode = batchItems.length >= BATCH_UI_THRESHOLD;
+    const updateBatchItem = useCallback((id: string, patch: Partial<BatchItem>) => {
+        setBatchItems(prev => prev.map(it => it.id === id ? { ...it, ...patch } : it));
+    }, []);
+
     // ─── Fullscreen result view ───
     // Auto-flips ON when a result lands (mirrors Compare's behavior) and the
     // user can close it with the X button or Esc. Closing returns to the
@@ -178,8 +213,9 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
         const prevent = (e: DragEvent) => e.preventDefault();
         const onDrop = (e: DragEvent) => {
             e.preventDefault();
-            const f = e.dataTransfer?.files[0];
-            if (f) processFile(f);
+            const files = e.dataTransfer?.files;
+            if (!files || files.length === 0) return;
+            processFiles(Array.from(files));
         };
         el.addEventListener("dragover", prevent);
         el.addEventListener("drop", onDrop);
@@ -187,14 +223,69 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
+    // Entry point for both drag-drop and the file input. 1 file → existing
+    // single-doc flow; 2+ files → batch flow (file list + per-file status +
+    // summary export). Files past MAX_BATCH_FILES are dropped with a toast.
+    const processFiles = useCallback((files: File[]) => {
+        if (files.length === 0) return;
+        if (files.length === 1) {
+            // Reset batch state so a previous batch run doesn't ghost the UI
+            // when the user comes back to drop a single file.
+            setBatchItems([]);
+            processFile(files[0]);
+            return;
+        }
+        const accepted = files.slice(0, MAX_BATCH_FILES);
+        const dropped = files.length - accepted.length;
+        if (dropped > 0) {
+            setError(t("ocr.batchTooManyFiles", { max: MAX_BATCH_FILES, dropped }));
+        } else {
+            setError(null);
+        }
+        // Clear the single-file slot so the batch UI takes over cleanly.
+        setFile(null);
+        previews.forEach(p => URL.revokeObjectURL(p));
+        setPreviews([]);
+        setResult(null);
+        setBatchItems(accepted.map(f => ({
+            id: crypto.randomUUID(),
+            file: f,
+            status: "queued",
+        })));
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [t, previews]);
+
     // ── File processing (PDF → per-page previews via pdf-lib) ──
     const processFile = useCallback(async (f: File) => {
-        setFile(f);
         setResult(null);
         setError(null);
         previews.forEach(p => URL.revokeObjectURL(p));
         setPreviews([]);
         setPreviewPage(0);
+        setZoom(1);
+
+        // .docx — flatten to a single PNG via mammoth + html2canvas BEFORE
+        // we set `file`. The downstream upload pipeline treats it as an image,
+        // and the preview path renders it the same way.
+        const isDocx = f.name.toLowerCase().endsWith(".docx")
+            || f.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+        if (isDocx) {
+            setFile(null);
+            setConverting("docx");
+            try {
+                const imgFile = await docxFileToImage(f);
+                setFile(imgFile);
+                setPreviews([URL.createObjectURL(imgFile)]);
+            } catch (err: any) {
+                console.error("DOCX→image conversion failed", err);
+                setError(t("ocr.convertDocxFailed", { msg: err?.message || "unknown" }));
+            } finally {
+                setConverting(null);
+            }
+            return;
+        }
+
+        setFile(f);
 
         if (isExcelFile(f)) {
             // ExcelPreview parses the file directly — no blob URL needed.
@@ -221,11 +312,14 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
         } else {
             setPreviews([URL.createObjectURL(f)]);
         }
-    }, [previews]);
+    }, [previews, t]);
 
     const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const f = e.target.files?.[0];
-        if (f) processFile(f);
+        const fl = e.target.files;
+        if (!fl || fl.length === 0) return;
+        processFiles(Array.from(fl));
+        // Allow the same files to be picked again later (e.g. after reset).
+        e.target.value = "";
     };
 
     // ── Template actions ──
@@ -398,6 +492,136 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
         }, 2000);
     };
 
+    // ── Batch runner (multi-file OCR) ──
+    // For each queued item: convert .docx if needed, POST /api/upload, then
+    // poll /api/status until `completed` or `error`. Concurrency capped at
+    // OCR_BATCH_CONCURRENCY so we don't trip Gemini's rate limit. Each item
+    // succeeds or fails independently — a single error never aborts the
+    // batch. INSUFFICIENT_CREDITS marks the item `skipped` (rest still run).
+    const runBatchItem = useCallback(async (item: BatchItem): Promise<void> => {
+        const fieldList = extractFields.map(f => f.type !== "text" ? `${f.name} (${f.type})` : f.name).join(", ");
+        try {
+            updateBatchItem(item.id, { status: "processing", error: undefined });
+
+            // .docx flatten to PNG before upload, same as single-file path.
+            let toUpload = item.file;
+            const isDocx = item.file.name.toLowerCase().endsWith(".docx")
+                || item.file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+            if (isDocx) {
+                try {
+                    toUpload = await docxFileToImage(item.file);
+                } catch (e: any) {
+                    updateBatchItem(item.id, { status: "error", error: t("ocr.convertDocxFailed", { msg: e?.message || "unknown" }) });
+                    return;
+                }
+            }
+
+            const fd = new FormData();
+            fd.append("file", toUpload);
+            if (user) fd.append("userId", user.id);
+            fd.append("fields", fieldList);
+
+            const uploadResp = await fetchJson<{ documentId?: string }>("/api/upload", { method: "POST", body: fd });
+            if (!uploadResp.ok) {
+                if (uploadResp.code === ErrorCode.INSUFFICIENT_CREDITS) {
+                    updateBatchItem(item.id, { status: "skipped", error: t("ocr.batchSkippedNoCredit") });
+                } else {
+                    updateBatchItem(item.id, { status: "error", error: apiError(uploadResp.code, uploadResp.vars, t) });
+                }
+                return;
+            }
+            if (!uploadResp.documentId) {
+                updateBatchItem(item.id, { status: "error", error: apiError(ErrorCode.UPLOAD_FAILED, undefined, t) });
+                return;
+            }
+
+            // Poll /api/status until done or timeout. Each tick checks
+            // status, not progress — backend writes the final row atomically.
+            const docId = uploadResp.documentId;
+            updateBatchItem(item.id, { docId });
+            const started = Date.now();
+            // eslint-disable-next-line no-constant-condition
+            while (true) {
+                if (Date.now() - started > PER_FILE_TIMEOUT_MS) {
+                    updateBatchItem(item.id, { status: "error", error: t("ocr.batchTimeout") });
+                    return;
+                }
+                await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+                try {
+                    const res = await fetch(`/api/status?id=${docId}`);
+                    const data = await res.json() as { status?: string; data?: any };
+                    if (data.status === "completed") {
+                        updateBatchItem(item.id, { status: "done", data: data.data });
+                        return;
+                    }
+                    if (data.status === "error") {
+                        updateBatchItem(item.id, { status: "error", error: t("ocr.aiFailedShort") });
+                        return;
+                    }
+                } catch { /* transient network error — keep polling */ }
+            }
+        } catch (e: any) {
+            updateBatchItem(item.id, { status: "error", error: e?.message || "unknown" });
+        }
+    }, [extractFields, user, updateBatchItem, t]);
+
+    const runBatch = useCallback(async () => {
+        if (batchItems.length === 0 || batchRunning) return;
+        if (extractFields.length === 0) {
+            setError(t("ocr.batchNoFields"));
+            return;
+        }
+        setBatchRunning(true);
+        setError(null);
+
+        // Snapshot the queue at run-start so re-rendering doesn't reshuffle
+        // what's already processing. Concurrency-limited worker pool: spin up
+        // N workers, each pulls the next queued id off the shared index.
+        const ids = batchItems.map(it => it.id);
+        let cursor = 0;
+        const next = () => (cursor < ids.length ? ids[cursor++] : null);
+
+        const worker = async () => {
+            while (true) {
+                const id = next();
+                if (!id) return;
+                // Re-read the latest version from state so any pre-flight
+                // mutation (e.g. re-queued retry) is honoured.
+                const current = await new Promise<BatchItem | undefined>(resolve => {
+                    setBatchItems(prev => { resolve(prev.find(b => b.id === id)); return prev; });
+                });
+                if (!current || current.status === "done") continue;
+                await runBatchItem(current);
+            }
+        };
+        await Promise.all(Array.from({ length: OCR_BATCH_CONCURRENCY }, () => worker()));
+
+        setBatchRunning(false);
+        // Personalised credit average — count only successful runs.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        const doneCount = await new Promise<number>(resolve => {
+            setBatchItems(prev => { resolve(prev.filter(b => b.status === "done").length); return prev; });
+        });
+        if (doneCount > 0) {
+            recordCreditUse(estimateCredits({ operation: "ocr", fields: extractFields.length }).credits * doneCount);
+            if (onDocumentProcessed) onDocumentProcessed();
+        }
+    }, [batchItems, batchRunning, extractFields, runBatchItem, onDocumentProcessed, t]);
+
+    const downloadBatchSummary = useCallback((format: "excel" | "csv") => {
+        const results: BatchResult[] = batchItems.map(it => ({
+            fileName: it.file.name,
+            data: it.data ?? null,
+            status: it.status === "done" ? "done" : it.status === "skipped" ? "skipped" : "error",
+            error: it.error,
+        }));
+        exportOCRBatch(results, "ocr-batch", format);
+    }, [batchItems]);
+
+    const removeBatchItem = useCallback((id: string) => {
+        setBatchItems(prev => prev.filter(it => it.id !== id));
+    }, []);
+
     // ── Result edit ──
     const updateField = (key: string, value: string) => {
         if (!result) return;
@@ -430,6 +654,9 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
         setError(null);
         setDocId(null);
         setIsExpandedView(false);
+        setZoom(1);
+        setConverting(null);
+        setBatchItems([]);
     };
 
     // ── Template filtering ──
@@ -917,7 +1144,19 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
                         border: "1px solid var(--color-border)",
                         borderRadius: 10, overflow: "hidden",
                     }}>
-                        {!file ? (
+                        {isBatchMode ? (
+                            <BatchPanel
+                                items={batchItems}
+                                running={batchRunning}
+                                onRun={runBatch}
+                                onDownload={downloadBatchSummary}
+                                onRemove={removeBatchItem}
+                                onAddMore={() => document.getElementById("ocr-file-input")?.click()}
+                                onClearAll={resetWorkspace}
+                                t={t}
+                                accent={ACCENT}
+                            />
+                        ) : !file ? (
                             <label
                                 className="ocr-dropzone"
                                 style={{
@@ -928,7 +1167,7 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
                                     margin: 12, borderRadius: 10,
                                     transition: "all 0.3s ease",
                                 }}>
-                                <input type="file" style={{ display: "none" }} onChange={handleFileInput} accept="application/pdf,image/*,.xlsx,.xls,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" />
+                                <input id="ocr-file-input" type="file" multiple style={{ display: "none" }} onChange={handleFileInput} accept="application/pdf,image/*,.docx,.xlsx,.xls,.xlsm,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" />
                                 <div
                                     className="ocr-dropzone-icon"
                                     style={{
@@ -982,6 +1221,55 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
                                         {((file?.size ?? 0) / 1024).toFixed(0)} KB
                                     </span>
                                     <div style={{ flex: 1 }} />
+                                    {/* Zoom controls — mirror Compare's per-slot zoom UX so the user
+                                        has the same muscle memory across both workspaces. */}
+                                    {file && (
+                                        <div style={{
+                                            display: "inline-flex", alignItems: "center", gap: 4,
+                                            padding: "2px 4px",
+                                            background: "var(--color-bg-elevated)",
+                                            border: "1px solid var(--color-border)",
+                                            borderRadius: 6,
+                                        }}>
+                                            <button
+                                                onClick={() => setZoomClamped(zoom - 0.25)}
+                                                disabled={zoom <= 0.5}
+                                                title={t("ocr.zoomOut")}
+                                                style={{
+                                                    background: "transparent", border: "none",
+                                                    color: "var(--color-text-2)",
+                                                    padding: "2px 6px", borderRadius: 4,
+                                                    fontSize: 12, fontWeight: 700,
+                                                    cursor: zoom <= 0.5 ? "not-allowed" : "pointer",
+                                                    opacity: zoom <= 0.5 ? 0.4 : 1,
+                                                }}
+                                            >−</button>
+                                            <button
+                                                onClick={() => setZoom(1)}
+                                                title={t("ocr.zoomReset")}
+                                                style={{
+                                                    background: "transparent", border: "none",
+                                                    color: "var(--color-text-2)",
+                                                    padding: "2px 6px", borderRadius: 4,
+                                                    fontSize: 10.5, fontWeight: 600, minWidth: 38,
+                                                    cursor: "pointer",
+                                                }}
+                                            >{Math.round(zoom * 100)}%</button>
+                                            <button
+                                                onClick={() => setZoomClamped(zoom + 0.25)}
+                                                disabled={zoom >= 3}
+                                                title={t("ocr.zoomIn")}
+                                                style={{
+                                                    background: "transparent", border: "none",
+                                                    color: "var(--color-text-2)",
+                                                    padding: "2px 6px", borderRadius: 4,
+                                                    fontSize: 12, fontWeight: 700,
+                                                    cursor: zoom >= 3 ? "not-allowed" : "pointer",
+                                                    opacity: zoom >= 3 ? 0.4 : 1,
+                                                }}
+                                            >+</button>
+                                        </div>
+                                    )}
                                     {!loading && (
                                         <button
                                             onClick={resetWorkspace}
@@ -1000,25 +1288,83 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
                                 </div>
 
                                 <div style={{
-                                    flex: 1, position: "relative", overflow: "hidden",
-                                    display: "flex", alignItems: "center", justifyContent: "center",
+                                    // Always overflow:auto — the docx/image branch uses width:100%
+                                    // height:auto, so a tall portrait scan needs vertical scroll at
+                                    // zoom=1 too, not only when zoomed in.
+                                    // `safe center` keeps the preview centered when it fits, but falls
+                                    // back to `start` alignment once it overflows — without `safe`,
+                                    // plain `center` puts the scrollbar origin in the middle of the
+                                    // content, which clips the LEFT/TOP edge when scrolled to it.
+                                    flex: 1, position: "relative",
+                                    overflow: "auto",
+                                    display: "flex",
+                                    alignItems: "safe center",
+                                    justifyContent: "safe center",
                                     background: "var(--color-bg-body)",
                                 }}>
+                                    {converting === "docx" && (
+                                        <div style={{
+                                            position: "absolute", inset: 0, zIndex: 5,
+                                            display: "flex", alignItems: "center", justifyContent: "center",
+                                            flexDirection: "column", gap: 8,
+                                            background: "color-mix(in srgb, var(--color-bg-body) 85%, transparent)",
+                                            color: "var(--color-text-2)", fontSize: 12.5,
+                                        }}>
+                                            <div style={{ width: 22, height: 22, border: "2px solid var(--color-border)", borderTopColor: ACCENT, borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+                                            {t("ocr.convertingDocx")}
+                                        </div>
+                                    )}
                                     {file && isExcelFile(file) ? (
                                         <div style={{ position: "absolute", inset: 0 }}>
-                                            <ExcelPreview file={file} highlights={excelHighlights} />
+                                            {/* CSS `zoom` works here because ExcelPreview has its own
+                                                scrollable container — no iframe + view-mode interaction. */}
+                                            <div style={{ width: "100%", height: "100%", zoom: zoom as any }}>
+                                                <ExcelPreview file={file} highlights={excelHighlights} />
+                                            </div>
                                         </div>
                                     ) : previews[previewPage] && (
                                         file?.type === "application/pdf"
-                                            ? <iframe
-                                                src={`${previews[previewPage]}#toolbar=0&navpanes=0&view=FitH`}
-                                                style={{ width: "100%", height: "100%", border: 0 }}
-                                            />
-                                            : <img
-                                                src={previews[previewPage]}
-                                                alt="Preview"
-                                                style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }}
-                                            />
+                                            // Wrap iframe in a sized div instead of sizing the iframe
+                                            // itself — `<iframe>` is a replaced element and `width: N%`
+                                            // applied directly to it in a flex container can be clamped
+                                            // by the flex layout. Sizing the wrapper div (block element)
+                                            // and letting the iframe fill it 100% gives the same result
+                                            // for the PDF viewer (`view=FitH` re-fits to the wrapper)
+                                            // without the flex sizing weirdness.
+                                            ? <div style={{
+                                                width: `${100 * zoom}%`,
+                                                height: `${100 * zoom}%`,
+                                                minWidth: "100%",
+                                                minHeight: "100%",
+                                                flexShrink: 0,
+                                            }}>
+                                                <iframe
+                                                    src={`${previews[previewPage]}#toolbar=0&navpanes=0&view=FitH`}
+                                                    style={{
+                                                        width: "100%", height: "100%", border: 0,
+                                                        display: "block",
+                                                    }}
+                                                />
+                                              </div>
+                                            // Image (incl. docx-flattened PNG): same wrapper pattern
+                                            // for the same flex-layout reason. Wrapper width is
+                                            // 100×zoom%; image fills wrapper width with height:auto.
+                                            // At zoom=1 the image renders at the wrapper's natural
+                                            // width (matches Compare workspace's "100% = real size").
+                                            : <div style={{
+                                                width: `${100 * zoom}%`,
+                                                flexShrink: 0,
+                                                display: "block",
+                                            }}>
+                                                <img
+                                                    src={previews[previewPage]}
+                                                    alt="Preview"
+                                                    style={{
+                                                        width: "100%", height: "auto",
+                                                        display: "block",
+                                                    }}
+                                                />
+                                              </div>
                                     )}
                                     {previews.length > 1 && (
                                         <div style={{
@@ -1408,6 +1754,213 @@ interface TemplateGroupProps {
     onSetDefault?: (id: string | null, e: React.MouseEvent) => void;
     pinLabel?: string;
     pinnedLabel?: string;
+}
+
+// ─── Batch panel ─────────────────────────────────────────────────────────────
+// Replaces the preview + result area when the user queues 2+ files. Renders
+// a per-file list with status badges + overall progress + a "Download
+// summary" action that bundles every successful result into one xlsx/csv.
+interface BatchPanelProps {
+    items: Array<{
+        id: string;
+        file: File;
+        status: "queued" | "processing" | "done" | "error" | "skipped";
+        data?: Record<string, any> | null;
+        error?: string;
+    }>;
+    running: boolean;
+    onRun: () => void;
+    onDownload: (format: "excel" | "csv") => void;
+    onRemove: (id: string) => void;
+    onAddMore: () => void;
+    onClearAll: () => void;
+    t: (key: string, vars?: Record<string, string | number>) => string;
+    accent: string;
+}
+function BatchPanel({ items, running, onRun, onDownload, onRemove, onAddMore, onClearAll, t, accent }: BatchPanelProps) {
+    const counts = {
+        total: items.length,
+        done: items.filter(i => i.status === "done").length,
+        error: items.filter(i => i.status === "error").length,
+        skipped: items.filter(i => i.status === "skipped").length,
+        processing: items.filter(i => i.status === "processing").length,
+    };
+    const finished = counts.done + counts.error + counts.skipped;
+    const allFinished = !running && finished === counts.total && counts.total > 0;
+    const hasResults = counts.done > 0;
+
+    const STATUS_STYLE: Record<string, { color: string; bg: string; label: string }> = {
+        queued:     { color: "var(--color-text-3)", bg: "var(--color-bg-elevated)", label: t("ocr.batchStatus.queued") },
+        processing: { color: "#f59e0b",            bg: "rgba(245,158,11,0.13)",     label: t("ocr.batchStatus.processing") },
+        done:       { color: "#10b981",            bg: "rgba(16,185,129,0.13)",     label: t("ocr.batchStatus.done") },
+        error:      { color: "#ef4444",            bg: "rgba(239,68,68,0.13)",      label: t("ocr.batchStatus.error") },
+        skipped:    { color: "#94a3b8",            bg: "rgba(148,163,184,0.13)",    label: t("ocr.batchStatus.skipped") },
+    };
+
+    return (
+        <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+            {/* Header — title + counters + actions */}
+            <div style={{
+                display: "flex", alignItems: "center", gap: 10,
+                padding: "10px 14px",
+                borderBottom: "1px solid var(--color-border)",
+                background: "var(--color-bg-surface)",
+            }}>
+                <strong style={{ fontSize: 13, color: "var(--color-text-1)" }}>
+                    {t("ocr.batchTitle")} · {counts.total} {t("common.files")}
+                </strong>
+                <span style={{ fontSize: 11.5, color: "var(--color-text-3)" }}>
+                    {t("ocr.batchProgress", { done: finished, total: counts.total })}
+                </span>
+                <div style={{ flex: 1 }} />
+                <button
+                    onClick={onAddMore}
+                    disabled={running}
+                    style={{
+                        background: "transparent", border: "1px solid var(--color-border)",
+                        color: "var(--color-text-2)", borderRadius: 6,
+                        padding: "5px 11px", fontSize: 11.5, fontWeight: 600,
+                        cursor: running ? "not-allowed" : "pointer", opacity: running ? 0.5 : 1,
+                    }}
+                >+ {t("ocr.batchAddMore")}</button>
+                <button
+                    onClick={onClearAll}
+                    disabled={running}
+                    style={{
+                        background: "transparent", border: "1px solid var(--color-border)",
+                        color: "var(--color-text-2)", borderRadius: 6,
+                        padding: "5px 11px", fontSize: 11.5,
+                        cursor: running ? "not-allowed" : "pointer", opacity: running ? 0.5 : 1,
+                    }}
+                >{t("ocr.batchClearAll")}</button>
+            </div>
+
+            {/* File list */}
+            <div className="custom-scrollbar" style={{ flex: 1, overflowY: "auto", padding: 10 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {items.map(it => {
+                        const st = STATUS_STYLE[it.status];
+                        return (
+                            <div key={it.id} style={{
+                                display: "flex", alignItems: "center", gap: 10,
+                                padding: "8px 10px",
+                                background: "var(--color-bg-elevated)",
+                                border: "1px solid var(--color-border)",
+                                borderRadius: 7,
+                            }}>
+                                <Icon.FileText width={14} height={14} color={accent} />
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                    <div style={{
+                                        fontSize: 12, fontWeight: 600, color: "var(--color-text-1)",
+                                        whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                                    }}>{it.file.name}</div>
+                                    <div style={{ fontSize: 10.5, color: "var(--color-text-3)", marginTop: 1 }}>
+                                        {(it.file.size / 1024).toFixed(0)} KB
+                                        {it.error ? <span style={{ color: "#ef4444", marginLeft: 6 }}>· {it.error}</span> : null}
+                                    </div>
+                                </div>
+                                <span style={{
+                                    fontSize: 9.5, fontWeight: 700, letterSpacing: 0.4,
+                                    padding: "3px 8px", borderRadius: 4,
+                                    background: st.bg, color: st.color,
+                                    textTransform: "uppercase",
+                                }}>{st.label}</span>
+                                {!running && it.status !== "processing" && (
+                                    <button
+                                        onClick={() => onRemove(it.id)}
+                                        title={t("ocr.batchRemoveFile")}
+                                        style={{
+                                            background: "none", border: "none",
+                                            color: "var(--color-text-3)", cursor: "pointer",
+                                            padding: 2, display: "inline-flex",
+                                        }}
+                                    ><Icon.X width={12} height={12} /></button>
+                                )}
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
+
+            {/* Footer — run / download */}
+            <div style={{
+                display: "flex", alignItems: "center", gap: 8,
+                padding: "10px 14px",
+                borderTop: "1px solid var(--color-border)",
+                background: "var(--color-bg-surface)",
+            }}>
+                <span style={{ fontSize: 11.5, color: "var(--color-text-3)" }}>
+                    {counts.done > 0 && <span style={{ color: "#10b981", marginRight: 8 }}>✓ {counts.done} {t("ocr.batchStatus.done")}</span>}
+                    {counts.error > 0 && <span style={{ color: "#ef4444", marginRight: 8 }}>✗ {counts.error} {t("ocr.batchStatus.error")}</span>}
+                    {counts.skipped > 0 && <span style={{ color: "#94a3b8" }}>· {counts.skipped} {t("ocr.batchStatus.skipped")}</span>}
+                </span>
+                <div style={{ flex: 1 }} />
+                {!allFinished ? (
+                    <button
+                        onClick={onRun}
+                        disabled={running || items.length === 0}
+                        style={{
+                            background: accent, color: "#fff",
+                            border: "none", borderRadius: 7,
+                            padding: "7px 16px", fontSize: 12.5, fontWeight: 700,
+                            cursor: (running || items.length === 0) ? "not-allowed" : "pointer",
+                            opacity: (running || items.length === 0) ? 0.6 : 1,
+                            display: "inline-flex", alignItems: "center", gap: 6,
+                        }}
+                    >
+                        {running ? (
+                            <>
+                                <div style={{ width: 11, height: 11, border: "2px solid rgba(255,255,255,0.3)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+                                {t("ocr.batchRunning")}
+                            </>
+                        ) : (
+                            <>
+                                <Icon.Zap width={12} height={12} />
+                                {t("ocr.batchRunAll")}
+                            </>
+                        )}
+                    </button>
+                ) : (
+                    <>
+                        <button
+                            onClick={() => onDownload("excel")}
+                            disabled={!hasResults}
+                            style={{
+                                background: "rgba(16,185,129,0.13)",
+                                border: "1px solid rgba(16,185,129,0.25)",
+                                color: hasResults ? "#10b981" : "var(--color-text-3)",
+                                borderRadius: 7, padding: "6px 12px",
+                                fontSize: 11.5, fontWeight: 600,
+                                cursor: hasResults ? "pointer" : "not-allowed",
+                                opacity: hasResults ? 1 : 0.5,
+                                display: "inline-flex", alignItems: "center", gap: 5,
+                            }}
+                        >
+                            <Icon.Download width={11} height={11} />
+                            {t("ocr.batchDownloadExcel")}
+                        </button>
+                        <button
+                            onClick={() => onDownload("csv")}
+                            disabled={!hasResults}
+                            style={{
+                                background: "rgba(59,130,246,0.13)",
+                                border: "1px solid rgba(59,130,246,0.25)",
+                                color: hasResults ? "var(--color-info)" : "var(--color-text-3)",
+                                borderRadius: 7, padding: "6px 12px",
+                                fontSize: 11.5, fontWeight: 600,
+                                cursor: hasResults ? "pointer" : "not-allowed",
+                                opacity: hasResults ? 1 : 0.5,
+                                display: "inline-flex", alignItems: "center", gap: 5,
+                            }}
+                        >
+                            <Icon.Download width={11} height={11} />
+                            {t("ocr.batchDownloadCsv")}
+                        </button>
+                    </>
+                )}
+            </div>
+        </div>
+    );
 }
 
 function TemplateGroup({ title, items, activeId, onPick, onBookmark, bookmarkedIds, accent, onDelete, defaultId, onSetDefault, pinLabel = "Set as default", pinnedLabel = "Default" }: TemplateGroupProps) {

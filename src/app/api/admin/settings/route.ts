@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { fail, ErrorCode } from "@/lib/apiResponse";
+import { requireAdmin } from "@/lib/auth/guards";
 
 
 export interface AIConfig {
@@ -14,18 +15,8 @@ export interface AIConfig {
 }
 
 export async function GET(req: NextRequest) {
-    const token = req.cookies.get("session")?.value;
-    let caller: { id?: string; role?: string } | null = null;
-    if (token) {
-        try {
-            const json = decodeURIComponent(escape(atob(token)));
-            caller = JSON.parse(json) as { id?: string; role?: string };
-        } catch {
-            caller = null;
-        }
-    }
-
-    if (caller?.role !== "admin") return fail(ErrorCode.UNAUTHORIZED, { context: "admin-settings" });
+    const auth = await requireAdmin(req);
+    if (auth instanceof Response) return auth;
 
     try {
         const { env } = await getCloudflareContext();
@@ -71,18 +62,8 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-    const token = req.cookies.get("session")?.value;
-    let caller: { id?: string; role?: string } | null = null;
-    if (token) {
-        try {
-            const json = decodeURIComponent(escape(atob(token)));
-            caller = JSON.parse(json) as { id?: string; role?: string };
-        } catch {
-            caller = null;
-        }
-    }
-
-    if (caller?.role !== "admin") return fail(ErrorCode.UNAUTHORIZED, { context: "admin-settings" });
+    const auth = await requireAdmin(req);
+    if (auth instanceof Response) return auth;
 
     try {
         const { action, config } = await req.json() as { action: 'add' | 'remove' | 'update' | 'toggle', config: AIConfig };

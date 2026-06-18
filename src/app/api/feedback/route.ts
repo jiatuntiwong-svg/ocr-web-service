@@ -6,6 +6,7 @@ import { NextRequest } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { logSystemEvent } from "@/lib/logger";
 import { ok, fail, ErrorCode } from "@/lib/apiResponse";
+import { getSessionUser } from "@/lib/auth/session";
 
 const ALLOWED_CATEGORIES = new Set(["bug", "feature", "other"]);
 const MAX_MESSAGE = 4000;
@@ -13,12 +14,15 @@ const MAX_MESSAGE = 4000;
 export async function POST(req: NextRequest) {
     try {
         const body = await req.json() as {
-            userId?: string;
+            // userId in the body is ignored — we always attribute feedback to
+            // the verified session (or null for anonymous), never to whoever
+            // the client claims to be.
             category?: string;
             message?: string;
             pageUrl?: string;
             userAgent?: string;
         };
+        const session = await getSessionUser(req);
         const message = (body.message || "").trim();
         if (!message) {
             return fail(ErrorCode.MISSING_FIELDS, { context: "feedback" });
@@ -34,7 +38,7 @@ export async function POST(req: NextRequest) {
             ? body.category!
             : "other";
 
-        const userId = body.userId && body.userId !== "guest" ? body.userId : null;
+        const userId = session?.id ?? null;
         const pageUrl = (body.pageUrl || "").slice(0, 500) || null;
         const userAgent = (body.userAgent || req.headers.get("user-agent") || "").slice(0, 500) || null;
 

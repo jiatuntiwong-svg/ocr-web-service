@@ -5,25 +5,12 @@ import { logSystemEvent } from "@/lib/logger";
 import { ok, fail, ErrorCode } from "@/lib/apiResponse";
 import { verifyPassword, hashPassword, isHashed } from "@/lib/passwordHash";
 import { broadcastToAdmins, wasNotifiedRecently } from "@/lib/notifications";
-
-
-type UserPayload = { id: string; name: string; email: string; role: string; plan: string; ts: number };
-
-function makeToken(user: Omit<UserPayload, "ts">): string {
-    return btoa(unescape(encodeURIComponent(JSON.stringify({ ...user, ts: Date.now() }))));
-}
-
-function parseToken(token: string): UserPayload | null {
-    try {
-        const json = decodeURIComponent(escape(atob(token)));
-        const payload = JSON.parse(json) as UserPayload;
-        const sevenDays = 7 * 24 * 60 * 60 * 1000;
-        if (Date.now() - payload.ts > sevenDays) return null;
-        return payload;
-    } catch {
-        return null;
-    }
-}
+import {
+    makeSessionToken,
+    verifySessionToken,
+    SESSION_COOKIE_NAME,
+    SESSION_TTL_MS,
+} from "@/lib/auth/session";
 
 // Returns:
 //   row    — user found
@@ -56,10 +43,10 @@ async function upgradeLegacyPassword(userId: string, plain: string) {
 }
 
 function setSessionCookie(response: NextResponse, token: string) {
-    response.cookies.set("session", token, {
+    response.cookies.set(SESSION_COOKIE_NAME, token, {
         httpOnly: true,
         sameSite: "lax",
-        maxAge: 60 * 60 * 24 * 7,
+        maxAge: Math.floor(SESSION_TTL_MS / 1000),
         path: "/",
     });
 }
@@ -134,7 +121,7 @@ export async function POST(req: NextRequest) {
             if (env) await logSystemEvent(env, "LOGIN_SUCCESS", `User logged in: ${foundUser.email}`, "info", foundUser.id);
         } catch {}
 
-        const token = makeToken(foundUser);
+        const token = await makeSessionToken(foundUser);
         const response = ok({ user: foundUser, success: true });
         setSessionCookie(response, token);
         return response;
@@ -145,14 +132,14 @@ export async function POST(req: NextRequest) {
 
 // ─── GET /api/auth  → Get current session ────────────────────────────────────
 export async function GET(req: NextRequest) {
-    const cookie = req.cookies.get("session");
+    const cookie = req.cookies.get(SESSION_COOKIE_NAME);
     if (!cookie?.value) {
         return NextResponse.json({ user: null }, { status: 401 });
     }
-    const payload = parseToken(cookie.value);
+    const payload = await verifySessionToken(cookie.value);
     if (!payload) {
         const res = NextResponse.json({ user: null }, { status: 401 });
-        res.cookies.delete("session");
+        res.cookies.delete(SESSION_COOKIE_NAME);
         return res;
     }
 
@@ -181,9 +168,9 @@ export async function GET(req: NextRequest) {
 export async function DELETE(req: NextRequest) {
     // Log logout
     try {
-        const cookie = req.cookies.get("session");
+        const cookie = req.cookies.get(SESSION_COOKIE_NAME);
         if (cookie?.value) {
-            const payload = parseToken(cookie.value);
+            const payload = await verifySessionToken(cookie.value);
             if (payload) {
                 const { env } = await getCloudflareContext();
                 if (env) await logSystemEvent(env, "LOGOUT", `User logged out: ${payload.email}`, "info", payload.id);
@@ -191,6 +178,6 @@ export async function DELETE(req: NextRequest) {
         }
     } catch {}
     const response = NextResponse.json({ success: true });
-    response.cookies.delete("session");
+    response.cookies.delete(SESSION_COOKIE_NAME);
     return response;
 }

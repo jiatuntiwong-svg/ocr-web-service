@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { fail, ErrorCode } from "@/lib/apiResponse";
+import { requireUser, ensureCanActAs } from "@/lib/auth/guards";
 
 
 // แม่แบบมาตรฐาน (Global Templates)
@@ -97,12 +98,14 @@ const GLOBAL_TEMPLATES = [
 
 // ดึง Template ทั้งหมดของผู้ใช้ + Global
 export async function GET(request: NextRequest) {
-    const { searchParams } = new URL(request.url);
-    const userId = searchParams.get("userId");
+    const auth = await requireUser(request);
+    if (auth instanceof Response) return auth;
 
-    if (!userId) {
-        return fail(ErrorCode.MISSING_FIELDS, { context: "templates" });
-    }
+    const { searchParams } = new URL(request.url);
+    const requested = searchParams.get("userId") ?? auth.id;
+    const cross = ensureCanActAs(auth, requested);
+    if (cross) return cross;
+    const userId = requested;
 
     try {
         const { env } = await getCloudflareContext();
@@ -123,10 +126,17 @@ export async function GET(request: NextRequest) {
 // by guessing IDs.
 export async function POST(request: NextRequest) {
     try {
-        const body = (await request.json()) as { userId: string; name: string; fields: any; id?: string };
-        const { userId, name, fields, id: providedId } = body;
+        const auth = await requireUser(request);
+        if (auth instanceof Response) return auth;
 
-        if (!userId || !name || !fields) {
+        const body = (await request.json()) as { userId?: string; name: string; fields: any; id?: string };
+        const { name, fields, id: providedId } = body;
+        const requested = body.userId ?? auth.id;
+        const cross = ensureCanActAs(auth, requested);
+        if (cross) return cross;
+        const userId = requested;
+
+        if (!name || !fields) {
             return fail(ErrorCode.MISSING_FIELDS, { context: "templates-save" });
         }
 
@@ -160,11 +170,17 @@ export async function POST(request: NextRequest) {
 
 // ลบ Template
 export async function DELETE(request: NextRequest) {
+    const auth = await requireUser(request);
+    if (auth instanceof Response) return auth;
+
     const { searchParams } = new URL(request.url);
     const id = searchParams.get("id");
-    const userId = searchParams.get("userId");
+    const requested = searchParams.get("userId") ?? auth.id;
+    const cross = ensureCanActAs(auth, requested);
+    if (cross) return cross;
+    const userId = requested;
 
-    if (!id || !userId) {
+    if (!id) {
         return fail(ErrorCode.MISSING_FIELDS, { context: "templates-delete" });
     }
 

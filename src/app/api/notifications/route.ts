@@ -10,6 +10,7 @@
 import { NextRequest } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { ok, fail, ErrorCode } from "@/lib/apiResponse";
+import { requireUser, ensureCanActAs } from "@/lib/auth/guards";
 
 interface NotificationRow {
     id: string;
@@ -27,11 +28,16 @@ interface NotificationRow {
 
 export async function GET(req: NextRequest) {
     try {
-        const { searchParams } = new URL(req.url);
-        const userId = searchParams.get("userId");
-        const limit = Math.min(parseInt(searchParams.get("limit") ?? "50", 10) || 50, 200);
+        const auth = await requireUser(req);
+        if (auth instanceof Response) return auth;
 
-        if (!userId) return fail(ErrorCode.MISSING_FIELDS, { context: "notifications" });
+        const { searchParams } = new URL(req.url);
+        const requested = searchParams.get("userId") ?? auth.id;
+        const cross = ensureCanActAs(auth, requested);
+        if (cross) return cross;
+        const userId = requested;
+
+        const limit = Math.min(parseInt(searchParams.get("limit") ?? "50", 10) || 50, 200);
 
         const { env } = await getCloudflareContext();
         if (!env?.DB) {
@@ -78,11 +84,18 @@ export async function GET(req: NextRequest) {
 
 export async function PATCH(req: NextRequest) {
     try {
+        const auth = await requireUser(req);
+        if (auth instanceof Response) return auth;
+
         const body = await req.json() as { userId?: string; id?: string; markAll?: boolean };
-        if (!body.userId) return fail(ErrorCode.MISSING_FIELDS, { context: "notifications" });
+        const requested = body.userId ?? auth.id;
+        const cross = ensureCanActAs(auth, requested);
+        if (cross) return cross;
         if (!body.id && !body.markAll) {
             return fail(ErrorCode.BAD_REQUEST, { detail: "id or markAll required", context: "notifications" });
         }
+        // Reassign so downstream queries scope to the verified user, never the body.
+        body.userId = requested;
 
         const { env } = await getCloudflareContext();
         if (!env?.DB) return ok({ success: true });

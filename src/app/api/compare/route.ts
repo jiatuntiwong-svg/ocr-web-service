@@ -6,6 +6,7 @@ import { logAiUsage } from "@/lib/ai-usage";
 import { loadFeatureFlags, isFeatureEnabled } from "@/lib/tier-config";
 import { estimateCredits, actualCredits } from "@/lib/pricing";
 import { ok, fail, ErrorCode } from "@/lib/apiResponse";
+import { requireUser, ensureCanActAs } from "@/lib/auth/guards";
 // Semantic normalisation for diff verdicts — see lib/diffNormalize.ts for
 // the full ordering (date → arithmetic → numeric-with-unit → fallback).
 import { normalizeForDiff, isVerdictMode, type VerdictMode } from "@/lib/diffNormalize";
@@ -181,8 +182,14 @@ export async function POST(req: NextRequest) {
     let userId = "guest";
 
     try {
+        const auth = await requireUser(req);
+        if (auth instanceof Response) return auth;
+
         const formData = await req.formData();
-        userId = (formData.get("userId") as string) || "guest";
+        const requested = (formData.get("userId") as string) || auth.id;
+        const cross = ensureCanActAs(auth, requested);
+        if (cross) return cross;
+        userId = requested;
         const selectedModelId = (formData.get("selectedModelId") as string) || "";
 
         const files: File[] = [];

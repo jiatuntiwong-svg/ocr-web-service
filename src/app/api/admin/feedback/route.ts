@@ -5,25 +5,13 @@
 import { NextRequest } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { ok, fail, ErrorCode } from "@/lib/apiResponse";
-
-function getSessionUser(req: NextRequest): { id?: string; role?: string } | null {
-    const token = req.cookies.get("session")?.value;
-    if (!token) return null;
-    try {
-        const json = decodeURIComponent(escape(atob(token)));
-        return JSON.parse(json) as { id?: string; role?: string };
-    } catch {
-        return null;
-    }
-}
+import { requireAdmin } from "@/lib/auth/guards";
 
 const ALLOWED_STATUSES = new Set(["new", "in_progress", "resolved"]);
 
 export async function GET(req: NextRequest) {
-    const caller = getSessionUser(req);
-    if (caller?.role !== "admin") {
-        return fail(ErrorCode.UNAUTHORIZED, { context: "admin-feedback" });
-    }
+    const auth = await requireAdmin(req);
+    if (auth instanceof Response) return auth;
     try {
         const { env } = await getCloudflareContext();
         if (!env?.DB) {
@@ -58,10 +46,8 @@ export async function GET(req: NextRequest) {
 }
 
 export async function PATCH(req: NextRequest) {
-    const caller = getSessionUser(req);
-    if (caller?.role !== "admin" || !caller.id) {
-        return fail(ErrorCode.UNAUTHORIZED, { context: "admin-feedback" });
-    }
+    const auth = await requireAdmin(req);
+    if (auth instanceof Response) return auth;
     try {
         const body = await req.json() as {
             id?: string;
@@ -88,7 +74,7 @@ export async function PATCH(req: NextRequest) {
             binds.push(body.status);
             if (body.status === "resolved") {
                 sets.push("resolved_by = ?", "resolved_at = CURRENT_TIMESTAMP");
-                binds.push(caller.id);
+                binds.push(auth.id);
             } else {
                 // Re-opening clears the resolution stamp so the audit trail
                 // doesn't lie about when the work actually closed.

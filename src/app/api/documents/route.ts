@@ -1,21 +1,25 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { fail, ErrorCode } from "@/lib/apiResponse";
+import { requireUser, ensureCanActAs } from "@/lib/auth/guards";
 
 // Lists a user's documents (newest first) for the dashboard "View All".
 // Same row shape as /api/stats `recentActivity` so the UI can reuse it.
 export async function GET(req: NextRequest) {
     try {
+        const auth = await requireUser(req);
+        if (auth instanceof Response) return auth;
+
         const { searchParams } = new URL(req.url);
-        const userId = searchParams.get("userId");
+        const requested = searchParams.get("userId") ?? auth.id;
+        const cross = ensureCanActAs(auth, requested);
+        if (cross) return cross;
+        const userId = requested;
+
         const limitRaw = Number(searchParams.get("limit"));
         const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 200) : 100;
         const search = (searchParams.get("search") || "").trim();
         const type = (searchParams.get("type") || "").trim().toLowerCase(); // "ocr" | "compare" | ""
-
-        if (!userId) {
-            return fail(ErrorCode.MISSING_FIELDS, { context: "documents" });
-        }
 
         const { env } = await getCloudflareContext();
         if (!env?.DB) {

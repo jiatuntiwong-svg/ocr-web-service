@@ -9,13 +9,22 @@ import { estimateCredits } from "@/lib/pricing";
 import { parseExcel, workbookToPromptText, isExcelFile } from "@/lib/excel-parser";
 import { ok, fail, ErrorCode } from "@/lib/apiResponse";
 import { createNotification } from "@/lib/notifications";
+import { requireUser, ensureCanActAs } from "@/lib/auth/guards";
 
 
 export async function POST(request: NextRequest) {
   try {
+    const auth = await requireUser(request);
+    if (auth instanceof Response) return auth;
+
     const data = await request.formData();
     const file = data.get("file") as unknown as File;
-    const userId = (data.get("userId") as string) || "guest";
+    // Honour `userId` only when it matches the session (or admin). Older
+    // clients pass it explicitly; new clients can omit it.
+    const requested = (data.get("userId") as string) || auth.id;
+    const cross = ensureCanActAs(auth, requested);
+    if (cross) return cross;
+    const userId = requested;
     const fieldsToExtract = (data.get("fields") as string) || "ชื่อบริษัท, เลขผู้เสียภาษี, ยอดรวม, วันที่";
     const selectedModelId = (data.get("selectedModelId") as string) || "";
 

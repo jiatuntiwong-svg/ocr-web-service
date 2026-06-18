@@ -1,5 +1,7 @@
 @import "tailwindcss";
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@300;400;500;600;700;800&display=swap');
+/* Noto Sans Thai is loaded via <link> in layout.tsx — Turbopack rejects
+ * mid-stylesheet @import (CSS spec requires @import before any rule, and
+ * tailwindcss above generates rules at the import site). */
 
 /* Force class-based dark mode (instead of prefers-color-scheme) — lets us
  * lock the app to dark regardless of the user's system setting, and lights up

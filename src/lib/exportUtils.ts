@@ -79,6 +79,101 @@ export function exportOCRResult(
     }
 }
 
+// ─── Multi-file batch export ────────────────────────────────────────────────
+// Used by the batch OCR runner — one row per file on a "Summary" sheet, plus
+// one extra sheet per table-typed field with a `Source File` column so rows
+// from different files don't get mixed up.
+
+export interface BatchResult {
+    fileName: string;
+    /** OCR-extracted data, same shape as `exportOCRResult(data)`. May be null
+     *  for files that errored or were skipped — those still show up on the
+     *  summary sheet with their status so the user can see what happened. */
+    data: Record<string, any> | null;
+    status: "done" | "error" | "skipped";
+    error?: string;
+}
+
+/** Unwrap `{ value, confidence }` to just `value`; everything else passes through. */
+function unwrapValue(item: any): any {
+    return item && typeof item === "object" && "value" in item ? item.value : item;
+}
+
+export function exportOCRBatch(
+    results: BatchResult[],
+    filename: string,
+    format: ExportFormat,
+): void {
+    try {
+        const wb = XLSX.utils.book_new();
+
+        // Union of every scalar field key across all results. Stable order
+        // (first time each key is seen) so the column layout is predictable.
+        const scalarFieldOrder: string[] = [];
+        const tableFieldOrder: string[] = [];
+        const seenScalar = new Set<string>();
+        const seenTable = new Set<string>();
+        for (const r of results) {
+            if (!r.data) continue;
+            for (const [key, item] of Object.entries(r.data)) {
+                const val = unwrapValue(item);
+                const isTable = Array.isArray(val) && val.length > 0 && typeof val[0] === "object";
+                if (isTable) {
+                    if (!seenTable.has(key)) { seenTable.add(key); tableFieldOrder.push(key); }
+                } else {
+                    if (!seenScalar.has(key)) { seenScalar.add(key); scalarFieldOrder.push(key); }
+                }
+            }
+        }
+
+        // Summary sheet: 1 row per file. Columns = File, Status, Error,
+        // then every scalar field, then a "(rows in <table>)" count column
+        // for each table field so the user can scan which files contributed.
+        const summaryRows: Record<string, string | number>[] = results.map(r => {
+            const row: Record<string, string | number> = {
+                File: r.fileName,
+                Status: r.status,
+                Error: r.error ?? "",
+            };
+            for (const key of scalarFieldOrder) {
+                const val = r.data ? unwrapValue(r.data[key]) : null;
+                row[key] = val == null ? "" : String(val);
+            }
+            for (const key of tableFieldOrder) {
+                const val = r.data ? unwrapValue(r.data[key]) : null;
+                row[`(rows in ${key})`] = Array.isArray(val) ? val.length : 0;
+            }
+            return row;
+        });
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryRows), "Summary");
+
+        // One sheet per table field: aggregate rows from every file with a
+        // leading "Source File" column. CSV exports only get the Summary
+        // sheet — the table sheets fall off the workbook when XLSX writes CSV.
+        for (const key of tableFieldOrder) {
+            const aggregated: Record<string, any>[] = [];
+            for (const r of results) {
+                if (!r.data) continue;
+                const val = unwrapValue(r.data[key]);
+                if (!Array.isArray(val)) continue;
+                for (const row of val) {
+                    aggregated.push({ "Source File": r.fileName, ...row });
+                }
+            }
+            if (aggregated.length === 0) continue;
+            XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(aggregated), safeSheetName(key));
+        }
+
+        const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+        const outName = `${filename}_${ts}`;
+        if (format === "excel") XLSX.writeFile(wb, `${outName}.xlsx`);
+        else XLSX.writeFile(wb, `${outName}.csv`, { bookType: "csv" });
+    } catch (err) {
+        console.error("exportOCRBatch error:", err);
+        alert("Batch export failed. Please try again.");
+    }
+}
+
 /**
  * Build a workbook from a document-comparison result and download it.
  * One "Comparison" sheet (Field / Document N / Different) + a "Summary" sheet.

@@ -6,21 +6,12 @@ import {
     sanitizeTierCredits, sanitizeFeatureFlags,
 } from "@/lib/tier-config";
 import { fail, ErrorCode } from "@/lib/apiResponse";
+import { requireAdmin } from "@/lib/auth/guards";
 
 // Admin "Tier Control" API — manages per-tier feature toggles AND per-tier
 // starting credit in one place.
 //   GET  → current flags + credits + metadata
 //   POST → save flags and/or credits
-
-function getCaller(req: NextRequest): { id?: string; role?: string } | null {
-    const token = req.cookies.get("session")?.value;
-    if (!token) return null;
-    try {
-        return JSON.parse(decodeURIComponent(escape(atob(token)))) as { id?: string; role?: string };
-    } catch {
-        return null;
-    }
-}
 
 async function saveSetting(env: any, key: string, value: unknown): Promise<void> {
     await env.DB.prepare(
@@ -34,9 +25,8 @@ async function saveSetting(env: any, key: string, value: unknown): Promise<void>
 }
 
 export async function GET(req: NextRequest) {
-    if (getCaller(req)?.role !== "admin") {
-        return fail(ErrorCode.UNAUTHORIZED, { context: "admin-tier" });
-    }
+    const auth = await requireAdmin(req);
+    if (auth instanceof Response) return auth;
     try {
         const { env } = await getCloudflareContext();
         if (!env?.DB) {
@@ -60,9 +50,8 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-    if (getCaller(req)?.role !== "admin") {
-        return fail(ErrorCode.UNAUTHORIZED, { context: "admin-tier" });
-    }
+    const auth = await requireAdmin(req);
+    if (auth instanceof Response) return auth;
     try {
         const { env } = await getCloudflareContext();
         if (!env?.DB) return fail(ErrorCode.SERVER_ERROR, { detail: "no DB binding", context: "admin-tier" });

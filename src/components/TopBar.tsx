@@ -17,6 +17,7 @@ const VIEW_META: Record<string, { i18nKey: string; icon: IconName; accent: strin
     admin_users:         { i18nKey: "adminUsers",       icon: "Users",      accent: "#10b981" },
     admin_ai_usage:      { i18nKey: "adminAiUsage",     icon: "Cpu",        accent: "#10b981" },
     admin_logs:          { i18nKey: "adminLogs",        icon: "FileText",   accent: "#10b981" },
+    admin_feedback:      { i18nKey: "adminFeedback",    icon: "FileText",   accent: "#10b981" },
     admin_tier_control:  { i18nKey: "adminTierControl", icon: "Sliders",    accent: "#10b981" },
     settings:            { i18nKey: "settings",         icon: "Key",        accent: "#10b981" },
 };

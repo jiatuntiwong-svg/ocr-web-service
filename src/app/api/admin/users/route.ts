@@ -3,19 +3,7 @@ import { DEV_USERS, PLAN_LIMITS } from "@/lib/devUsers";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { fail, ErrorCode } from "@/lib/apiResponse";
 import { hashPassword } from "@/lib/passwordHash";
-
-
-// ── Verify caller is admin by reading their session cookie ──────────────────
-function getSessionUser(req: NextRequest): { id?: string; role?: string } | null {
-    const token = req.cookies.get("session")?.value;
-    if (!token) return null;
-    try {
-        const json = decodeURIComponent(escape(atob(token)));
-        return JSON.parse(json) as { id?: string; role?: string };
-    } catch {
-        return null;
-    }
-}
+import { requireAdmin } from "@/lib/auth/guards";
 
 // ── Try to get CF D1 env (returns null in next dev / if not bound) ───────────
 async function getCFEnv() {
@@ -69,10 +57,8 @@ function buildRow(u: { id: string; name: string; email: string; role: string; pl
 
 // ── GET /api/admin/users  ─ list all users with stats ──────────────────────
 export async function GET(req: NextRequest) {
-    const caller = getSessionUser(req);
-    if (caller?.role !== "admin") {
-        return fail(ErrorCode.UNAUTHORIZED, { context: "admin-users" });
-    }
+    const auth = await requireAdmin(req);
+    if (auth instanceof Response) return auth;
 
     try {
         const env = await getCFEnv();
@@ -110,10 +96,8 @@ export async function GET(req: NextRequest) {
 
 // ── PATCH /api/admin/users  ─ update credit limit, plan, or role ────────────
 export async function PATCH(req: NextRequest) {
-    const caller = getSessionUser(req);
-    if (caller?.role !== "admin") {
-        return fail(ErrorCode.UNAUTHORIZED, { context: "admin-users" });
-    }
+    const auth = await requireAdmin(req);
+    if (auth instanceof Response) return auth;
 
     try {
         const body = await req.json() as {

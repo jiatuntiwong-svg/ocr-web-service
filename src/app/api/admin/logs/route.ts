@@ -1,20 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { fail, ErrorCode } from "@/lib/apiResponse";
+import { requireAdmin } from "@/lib/auth/guards";
 
-
-
-function getSessionUser(req: NextRequest): { id?: string; role?: string } | null {
-    const token = req.cookies.get("session")?.value;
-    if (!token) return null;
-
-    try {
-        const json = decodeURIComponent(escape(atob(token)));
-        return JSON.parse(json) as { id?: string; role?: string };
-    } catch {
-        return null;
-    }
-}
 
 async function getCFEnv() {
     try {
@@ -26,10 +14,8 @@ async function getCFEnv() {
 }
 
 export async function GET(req: NextRequest) {
-    const caller = getSessionUser(req);
-    if (caller?.role !== "admin") {
-        return fail(ErrorCode.UNAUTHORIZED, { context: "admin-logs" });
-    }
+    const auth = await requireAdmin(req);
+    if (auth instanceof Response) return auth;
 
     try {
         const env = await getCFEnv();

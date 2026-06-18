@@ -11,6 +11,21 @@
 NEXTJS_ENV=development
 
 
+# ─── Session signing secret (REQUIRED) ───────────────────────────────────────
+# Used to HMAC-sign the session cookie. ANY value works as long as it's at
+# least 32 random bytes — but it MUST stay secret and MUST be the same value
+# across all instances of the app. If this changes, every existing session
+# is invalidated and users have to log in again.
+#
+# Generate a fresh value with:
+#   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+# or in a shell:
+#   openssl rand -hex 32
+#
+# In production: `npx wrangler secret put SESSION_SECRET`
+SESSION_SECRET=replace-with-32-random-bytes-hex
+
+
 # ─── Google Gemini AI ────────────────────────────────────────────────────────
 # Get a key at https://aistudio.google.com/app/apikey (free tier available).
 # The app picks a model at runtime — Gemini Flash-Lite is the cheap default,

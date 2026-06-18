@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "copy-pdf-worker": "node -e \"require('fs').copyFileSync(require.resolve('pdfjs-dist/build/pdf.worker.min.mjs'),'public/pdf.worker.min.mjs')\"",
-    "dev": "npm run copy-pdf-worker && next dev",
+    "dev": "npm run copy-pdf-worker && next dev --turbopack",
     "dev:cf": "npm run copy-pdf-worker && opennextjs-cloudflare build && wrangler dev",
     "build": "npm run copy-pdf-worker && next build --webpack",
     "start": "next start",
