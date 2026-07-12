@@ -1,6 +1,5 @@
 "use client";
 import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
-import { PDFDocument } from "pdf-lib";
 import { exportOCRResult } from "@/lib/exportUtils";
 import { User } from "@/lib/types";
 import { Icon } from "./Icons";
@@ -10,6 +9,8 @@ import { fetchJson } from "@/lib/fetchJson";
 import { ErrorCode } from "@/lib/errorCodes";
 import { isExcelFile, type ExcelCellRef } from "@/lib/excel-parser";
 import { docxFileToImage } from "@/lib/docx-to-image";
+import { pdfFileToImageDetailed, type StackedPageRect, type PdfRasterResult } from "@/lib/pdf-to-image";
+import { buildFieldCrops } from "@/lib/field-crops";
 import { exportOCRBatch, type BatchResult } from "@/lib/exportUtils";
 import {
     MAX_BATCH_FILES,
@@ -17,6 +18,7 @@ import {
     PER_FILE_TIMEOUT_MS,
     POLL_INTERVAL_MS,
     BATCH_UI_THRESHOLD,
+    PAGE_SELECTION_MAX,
 } from "@/lib/ocrBatchConfig";
 import ExcelPreview from "./ExcelPreview";
 import ConfirmDialog from "./ConfirmDialog";
@@ -32,9 +34,44 @@ import {
 import CreditConfirmDialog from "./CreditConfirmDialog";
 import { useApp } from "@/lib/contexts/AppContext";
 import type { BatchItem } from "@/lib/types/batch";
+import { usePanZoom } from "@/lib/hooks/usePanZoom";
+import { ENABLE_OCR_SCAN_LINE, ENABLE_FIELD_POP, ENABLE_LOADING_STORY } from "@/lib/featureFlags";
+
+// Map progress (0..100) to a 5-step mini-story. The bands roughly mirror the
+// actual order in the upload flow: file prep → request sent → AI OCR phase →
+// AI extraction phase → response packaging. Step state is derived purely from
+// `progress` so we don't need backend changes — when /api/upload reports more
+// granular phases in the future, just expand this list.
+const LOADING_STORY_STEPS = [
+    { key: "stepUpload",  endAt: 30  },
+    { key: "stepPrepare", endAt: 50  },
+    { key: "stepReading", endAt: 70  },
+    { key: "stepExtract", endAt: 92  },
+    { key: "stepFormat",  endAt: 100 },
+] as const;
 
 // ─── Local Types ──────────────────────────────────────────────────────────────
-interface ExtractField { id: string; name: string; type: "text" | "number" | "currency" | "date" | "address" | "email" | "table"; }
+/** Approximate location of a field's value inside the document, expressed as
+ *  relative 0-1 rectangle so it survives resize/zoom. Used as a spatial hint
+ *  to the AI when the same template is applied to similar-layout documents
+ *  (e.g. batch upload of identical forms). Optional — templates without
+ *  hints fall back to semantic-only extraction. */
+interface FieldBboxHint {
+    x: number; y: number; width: number; height: number;
+    /** 1-based page for multi-page PDFs; defaults to 1 when omitted. */
+    page?: number;
+    /** Coordinate space marker (OCR-6c migration). Hints saved before the
+     *  iframe→canvas preview swap were measured against the wrapper rect
+     *  (portrait 210:297); anything landscape without this marker is
+     *  wrapper-space and needs redrawing. New hints always set "page". */
+    space?: "page";
+}
+interface ExtractField {
+    id: string;
+    name: string;
+    type: "text" | "number" | "currency" | "date" | "address" | "email" | "table" | "raw_text";
+    bbox_hint?: FieldBboxHint;
+}
 interface Template { id: string; name: string; fields_json: string; user_id?: string; }
 interface OCRResult { [key: string]: any; }
 
@@ -55,6 +92,16 @@ const TYPE_COLOR: Record<string, string> = {
     address:  "#8b5cf6",
     email:    "#06b6d4",
     table:    "#ec4899",
+    // raw_text = "copy exactly as-seen" — used for ref numbers / mixed labels
+    // where field-name semantic prior makes AI drop leading/trailing words.
+    raw_text: "#dc2626",
+};
+
+// Human-readable labels for the type dropdown/chip. Keys omitted here fall
+// back to the type identifier (upper-cased) — most types read the same either
+// way, so only the multi-word ones need a mapping.
+const TYPE_LABEL: Record<string, string> = {
+    raw_text: "RAW TEXT",
 };
 
 const ACCENT = "#6366f1"; // OCR zone accent
@@ -75,14 +122,60 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
     const [zoom, setZoom] = useState(1);
     const setZoomClamped = (next: number) =>
         setZoom(Math.max(0.5, Math.min(3, +next.toFixed(2))));
+    // Click-drag pan + Ctrl+wheel zoom + double-click reset + spacebar pan hint.
+    const panZoom = usePanZoom({ zoom, setZoom: setZoomClamped });
     const [previewPage, setPreviewPage] = useState(0);
     const dropRef = useRef<HTMLDivElement>(null);
+    // OCR-6c: cached pdfjs raster (stacked upload PNG + per-page PNGs + rects).
+    // Produced eagerly on PDF file select so the hint-drawing preview shows
+    // the SAME pixels the crop path will read — one coordinate space end to
+    // end, no wrapper-vs-page-rect mismatch on landscape/letterboxed pages.
+    // Reused at upload time so PDFs are rasterised exactly once per file.
+    const [pdfRaster, setPdfRaster] = useState<{
+        sourceFile: File;
+        result: PdfRasterResult;
+    } | null>(null);
+    // Per-page rendered pixel dimensions (mirrors pageRects width/height) — the
+    // preview wrapper sets aspectRatio from this so landscape pages render at
+    // their true aspect (no letterbox). Kept as a plain array so the mapping
+    // by index is trivial.
+    const previewPageAspect = pdfRaster
+        ? pdfRaster.result.pageRects.map(pr => `${pr.width} / ${pr.height}`)
+        : null;
+
+    // UI-1: page-picker state — 1-based ORIGINAL PDF page numbers the user
+    // wants to include in this OCR run. Initialised from `pdfRaster` when a
+    // multi-page PDF loads (default = first PAGE_SELECTION_MAX pages, or all
+    // pages when the doc is under the cap). Reset whenever the source file
+    // changes so a new upload doesn't inherit the previous selection.
+    //
+    // Empty for non-PDF files and single-page PDFs — those skip the picker
+    // and hit the server without `pages`/`total_pages` parts (server treats
+    // that as "no selection", identical to today's contract).
+    const [selectedPages, setSelectedPages] = useState<number[]>([]);
+    // Warn banner + inline cap-hint state (transient — cleared on next select).
+    const [pickerHint, setPickerHint] = useState<string | null>(null);
+    useEffect(() => {
+        if (!pdfRaster) { setSelectedPages([]); return; }
+        const total = pdfRaster.result.pagePngs.length;
+        if (total <= 1) { setSelectedPages([]); return; }
+        // Default = first N pages capped at PAGE_SELECTION_MAX. When
+        // total > cap, user must acknowledge which pages to keep.
+        const n = Math.min(total, PAGE_SELECTION_MAX);
+        setSelectedPages(Array.from({ length: n }, (_, i) => i + 1));
+        setPickerHint(null);
+    }, [pdfRaster]);
 
     // ─── Processing ───
     const [loading, setLoading] = useState(false);
     const [progress, setProgress] = useState(0);
     const [processingStep, setProcessingStep] = useState("");
     const [result, setResult] = useState<OCRResult | null>(null);
+    // Field-key signature at the time `result` was produced. When the current
+    // extractFields diverges from this snapshot, the result becomes stale
+    // (contains ghosts of removed fields or lacks newly added ones) and gets
+    // cleared automatically — see effect below.
+    const [resultFieldsSig, setResultFieldsSig] = useState<string>("");
     const [error, setError] = useState<string | null>(null);
 
     // Flatten `cells` arrays from every extracted field — ExcelPreview tints
@@ -127,7 +220,99 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
     ]);
     const [newFieldName, setNewFieldName] = useState("");
     const [newFieldType, setNewFieldType] = useState<ExtractField["type"]>("text");
+    // When set, the document preview shows a draw-mode overlay so the user
+    // can drag a rectangle → sets the field's bbox_hint. Escape / clicking
+    // "Clear hint" resets. Auto-clears when OCR runs so it doesn't leak.
+    const [hintEditingFieldId, setHintEditingFieldId] = useState<string | null>(null);
+    // Transient drag state during a bbox-hint draw. Coords are 0-1 relative
+    // to the preview wrapper; cleared on mouseup regardless of outcome.
+    const [hintDraw, setHintDraw] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+
+    // Commit the draw rectangle to the target field's bbox_hint + persist to
+    // the active template. Skips if either coord dimension is trivially small
+    // (accidental click) — needs at least 2% x 2% area to count.
+    const commitHintDraw = useCallback((fid: string, r: { x0: number; y0: number; x1: number; y1: number }) => {
+        const x = Math.min(r.x0, r.x1);
+        const y = Math.min(r.y0, r.y1);
+        const width = Math.abs(r.x1 - r.x0);
+        const height = Math.abs(r.y1 - r.y0);
+        if (width < 0.02 || height < 0.02) return;
+        const bbox_hint: FieldBboxHint = {
+            x: Math.max(0, Math.min(1, x)),
+            y: Math.max(0, Math.min(1, y)),
+            width: Math.max(0, Math.min(1, width)),
+            height: Math.max(0, Math.min(1, height)),
+            page: previewPage + 1,
+            space: "page",
+        };
+        const next = extractFields.map(f => f.id === fid ? { ...f, bbox_hint } : f);
+        setExtractFields(next);
+        // OCR-6c dev-only observability: log the raw wrapper fractions plus
+        // the resolved page rect (from pdfRaster.pageRects) so a future
+        // coordinate-space regression is diagnosable in one console line.
+        if (typeof process !== "undefined" && process.env?.NODE_ENV !== "production") {
+            const pr = pdfRaster?.result.pageRects[previewPage];
+            // eslint-disable-next-line no-console
+            console.debug("[OCR-6c] hint draw", {
+                fieldId: fid,
+                page: previewPage + 1,
+                bbox_hint,
+                pageRectPx: pr ? { width: pr.width, height: pr.height, isLandscape: pr.width > pr.height } : null,
+            });
+        }
+        // Persist to template silently if active.
+        if (activeTemplateId && user) {
+            const tpl = templates.find(t => t.id === activeTemplateId);
+            if (tpl) {
+                fetch("/api/templates", {
+                    method: "POST",
+                    body: JSON.stringify({ userId: user.id, name: tpl.name, fields: next, id: activeTemplateId }),
+                }).catch(err => console.warn("[bbox_hint] template save failed", err));
+            }
+        }
+    }, [extractFields, activeTemplateId, user, templates, previewPage, pdfRaster]);
+
+    // Escape key exits draw mode without committing.
+    useEffect(() => {
+        if (!hintEditingFieldId) return;
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === "Escape") { setHintEditingFieldId(null); setHintDraw(null); }
+        };
+        window.addEventListener("keydown", onKey);
+        return () => window.removeEventListener("keydown", onKey);
+    }, [hintEditingFieldId]);
     const [isTypeDropdownOpen, setIsTypeDropdownOpen] = useState(false);
+
+    // Auto-invalidate stale result: when the user adds/removes/renames a field
+    // after a run, the displayed result would keep ghosts of the old field set
+    // (or lack the new ones). Clearing forces a fresh OCR run against the
+    // current field list so the response can't be confused with "AI cache".
+    useEffect(() => {
+        if (!result) return;
+        const currentSig = extractFields.map(f => f.name).join("|");
+        if (currentSig !== resultFieldsSig) {
+            setResult(null);
+            setResultFieldsSig("");
+        }
+    }, [extractFields, result, resultFieldsSig]);
+
+    // Drag-to-reorder. Native HTML5 drag — chip stays clickable for remove,
+    // browser fires dragstart only past its movement threshold so a plain
+    // click still works.
+    const [draggingFieldId, setDraggingFieldId] = useState<string | null>(null);
+    const [dropTargetFieldId, setDropTargetFieldId] = useState<string | null>(null);
+    const reorderField = useCallback((fromId: string, toId: string) => {
+        if (fromId === toId) return;
+        setExtractFields(prev => {
+            const fromIdx = prev.findIndex(x => x.id === fromId);
+            const toIdx = prev.findIndex(x => x.id === toId);
+            if (fromIdx < 0 || toIdx < 0) return prev;
+            const arr = [...prev];
+            const [moved] = arr.splice(fromIdx, 1);
+            arr.splice(toIdx, 0, moved);
+            return arr;
+        });
+    }, []);
 
     // ─── Session ───
     const [docId, setDocId] = useState<string | null>(null);
@@ -255,7 +440,14 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [t, previews]);
 
-    // ── File processing (PDF → per-page previews via pdf-lib) ──
+    // ── File processing (PDF → per-page previews via pdfjs raster) ──
+    // OCR-6c: PDFs no longer use `<iframe src=…pdf#view=FitH>` for preview.
+    // The iframe letterboxes landscape pages inside a fixed-aspect wrapper,
+    // so hints drawn on-screen resolved into wrapper-space fractions that
+    // did NOT match the page-space fractions the crop code assumes. We
+    // now rasterise the PDF up front via pdfjs (the same call the upload
+    // path already uses) and preview each page as a plain `<img>` with
+    // its true aspect ratio. Preview pixels == upload pixels == crop pixels.
     const processFile = useCallback(async (f: File) => {
         setResult(null);
         setError(null);
@@ -263,6 +455,7 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
         setPreviews([]);
         setPreviewPage(0);
         setZoom(1);
+        setPdfRaster(null);
 
         // .docx — flatten to a single PNG via mammoth + html2canvas BEFORE
         // we set `file`. The downstream upload pipeline treats it as an image,
@@ -278,7 +471,7 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
                 setPreviews([URL.createObjectURL(imgFile)]);
             } catch (err: any) {
                 console.error("DOCX→image conversion failed", err);
-                setError(t("ocr.convertDocxFailed", { msg: err?.message || "unknown" }));
+                setError(t("ocr.convertDocxFailed"));
             } finally {
                 setConverting(null);
             }
@@ -295,24 +488,71 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
 
         if (f.type === "application/pdf") {
             try {
-                const ab = await f.arrayBuffer();
-                const pdf = await PDFDocument.load(ab);
-                const pages: string[] = [];
-                for (let i = 0; i < pdf.getPageCount(); i++) {
-                    const sub = await PDFDocument.create();
-                    const [p] = await sub.copyPages(pdf, [i]);
-                    sub.addPage(p);
-                    const bytes = await sub.save();
-                    pages.push(URL.createObjectURL(new Blob([bytes as unknown as BlobPart], { type: "application/pdf" })));
-                }
+                // Rasterise once, up front. pagePngs[i] are the per-page bitmaps
+                // that get shown in the preview; result.file is the stacked PNG
+                // that will be uploaded verbatim. Same source pixels for both
+                // sides of the hint contract.
+                const detailed = await pdfFileToImageDetailed(f);
+                const pages = detailed.pagePngs.map(b => URL.createObjectURL(b));
                 setPreviews(pages);
-            } catch {
+                setPdfRaster({ sourceFile: f, result: detailed });
+
+                // OCR-6c migration policy: hints saved BEFORE this fix were
+                // measured against the iframe wrapper (fixed 210:297). Hints
+                // on landscape pages (rendered rect wider than tall) were in
+                // wrapper-space, not page-space — the on-screen position and
+                // the crop rect no longer agree. Invalidate them silently and
+                // let the user redraw. Portrait pages match wrapper aspect
+                // closely enough that existing hints stay valid.
+                const landscapePages = new Set(
+                    detailed.pageRects
+                        .map((pr, i) => (pr.width > pr.height ? i + 1 : -1))
+                        .filter(p => p > 0),
+                );
+                if (landscapePages.size > 0) {
+                    let invalidated = 0;
+                    const cleaned = extractFields.map(fld => {
+                        const h = fld.bbox_hint;
+                        if (!h) return fld;
+                        const p = h.page ?? 1;
+                        if (!landscapePages.has(p)) return fld;
+                        // Only invalidate hints from BEFORE the OCR-6c coordinate
+                        // fix (no `space` marker = old wrapper-space). New hints
+                        // drawn on landscape pages carry `space: "page"` and are
+                        // valid — leaving them alone means users don't have to
+                        // redraw every load.
+                        if (h.space === "page") return fld;
+                        invalidated++;
+                        const { bbox_hint: _drop, ...rest } = fld;
+                        return rest as ExtractField;
+                    });
+                    if (invalidated > 0) {
+                        setExtractFields(cleaned);
+                        setError(t("ocr.landscapeHintsInvalidated", { count: invalidated }));
+                        // Persist the invalidation to the active template so
+                        // the wrapper-space hints don't come back on next apply.
+                        if (activeTemplateId && user) {
+                            const tpl = templates.find(x => x.id === activeTemplateId);
+                            if (tpl) {
+                                fetch("/api/templates", {
+                                    method: "POST",
+                                    body: JSON.stringify({ userId: user.id, name: tpl.name, fields: cleaned, id: activeTemplateId }),
+                                }).catch(err => console.warn("[bbox_hint] template save failed", err));
+                            }
+                        }
+                    }
+                }
+            } catch (err) {
+                // Rasterisation failed — fall back to a single-page image
+                // preview using the source PDF blob directly. Hints won't work
+                // on this fallback but the app doesn't crash. Log for triage.
+                console.warn("[OCR-6c] pdf raster for preview failed; using raw PDF blob", err);
                 setPreviews([URL.createObjectURL(f)]);
             }
         } else {
             setPreviews([URL.createObjectURL(f)]);
         }
-    }, [previews, t]);
+    }, [previews, t, extractFields, activeTemplateId, user, templates]);
 
     const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
         const fl = e.target.files;
@@ -327,6 +567,54 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
         setExtractFields(JSON.parse(tpl.fields_json));
         setActiveTemplateId(tpl.id);
     };
+
+    // Capture bboxes from an OCR response and — if a template is active —
+    // persist them silently so subsequent runs on the same template send
+    // spatial hints to the AI. Existing hints are preserved (user's manual
+    // tweaks win over auto-capture). Runs synchronously against local state
+    // and fires a template save in the background.
+    const captureBboxHints = useCallback((resultData: any) => {
+        // Only auto-capture when the AI is confident. Below this, the returned
+        // bbox may be a mis-read (e.g. on-line portion of a value that extends
+        // below the line) and persisting it would lock future runs to the wrong
+        // region. Tune here.
+        const BBOX_CAPTURE_CONFIDENCE = 80; // 0-100 scale, matches prompt spec
+        if (!resultData || !activeTemplateId || !user) return;
+        let anyChange = false;
+        const next = extractFields.map(f => {
+            // Never overwrite an existing hint. User's manual drawing (or a
+            // prior high-confidence capture) is authoritative; auto-capture
+            // only fills empty slots.
+            if (f.bbox_hint) return f;
+            const entry = resultData[f.name];
+            if (!entry || typeof entry !== "object") return f;
+            const bbox = entry.bbox;
+            const conf = Number(entry.confidence ?? 0);
+            if (!bbox || typeof bbox.x !== "number" || conf < BBOX_CAPTURE_CONFIDENCE) return f;
+            anyChange = true;
+            return {
+                ...f,
+                bbox_hint: {
+                    x: Math.max(0, Math.min(1, bbox.x)),
+                    y: Math.max(0, Math.min(1, bbox.y)),
+                    width: Math.max(0, Math.min(1, bbox.width)),
+                    height: Math.max(0, Math.min(1, bbox.height)),
+                    page: bbox.page && bbox.page > 0 ? bbox.page : 1,
+                    space: "page" as const,
+                },
+            };
+        });
+        if (!anyChange) return;
+        setExtractFields(next);
+        // Persist to template silently — errors are OK, next run just re-captures.
+        const tpl = templates.find(t => t.id === activeTemplateId);
+        if (tpl) {
+            fetch("/api/templates", {
+                method: "POST",
+                body: JSON.stringify({ userId: user.id, name: tpl.name, fields: next, id: activeTemplateId }),
+            }).catch(err => console.warn("[bbox_hint] template save failed", err));
+        }
+    }, [activeTemplateId, extractFields, templates, user]);
 
     const saveTemplate = async (overrideId?: string) => {
         if (!user) return;
@@ -401,6 +689,46 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
         setNewFieldName("");
     };
 
+    // ── UI-1: page-picker interactions ─────────────────────────────────────
+    const totalPagesInDoc = pdfRaster ? pdfRaster.result.pagePngs.length : 0;
+    const showPagePicker = !!pdfRaster && totalPagesInDoc > 1;
+    // "Selection equals the full document, in order" → skip the re-raster on
+    // upload (cheap short-circuit; also communicates "no server-side subset"
+    // to prepareUploadWithCrops).
+    const selectionIsFullDoc = useMemo(() => {
+        if (!showPagePicker) return true;
+        if (selectedPages.length !== totalPagesInDoc) return false;
+        for (let i = 0; i < selectedPages.length; i++) {
+            if (selectedPages[i] !== i + 1) return false;
+        }
+        return true;
+    }, [selectedPages, showPagePicker, totalPagesInDoc]);
+    const togglePageSelection = useCallback((page: number) => {
+        setPickerHint(null);
+        setSelectedPages(prev => {
+            if (prev.includes(page)) return prev.filter(p => p !== page);
+            if (prev.length >= PAGE_SELECTION_MAX) {
+                setPickerHint(t("ocr.pagePicker.capReached", { max: PAGE_SELECTION_MAX }));
+                return prev;
+            }
+            // Keep selection in ascending page order — matches how the stacked
+            // upload PNG will be assembled by the rasteriser (page 1 on top).
+            return [...prev, page].sort((a, b) => a - b);
+        });
+    }, [t]);
+    const selectAllPages = useCallback(() => {
+        setPickerHint(null);
+        const n = Math.min(totalPagesInDoc, PAGE_SELECTION_MAX);
+        if (n < totalPagesInDoc) {
+            setPickerHint(t("ocr.pagePicker.capReached", { max: PAGE_SELECTION_MAX }));
+        }
+        setSelectedPages(Array.from({ length: n }, (_, i) => i + 1));
+    }, [t, totalPagesInDoc]);
+    const selectNonePages = useCallback(() => {
+        setPickerHint(null);
+        setSelectedPages([]);
+    }, []);
+
     // ── Run (with optional confirm dialog) ──
     const tryRun = () => {
         if (!file || extractFields.length === 0) return;
@@ -422,6 +750,131 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
         setConfirmDialog({ reasons: ev.reasons, fingerprint: fp });
     };
 
+    // ─── OCR-6: crop-based extraction for hinted fields ──────────────────────
+    // Shared by handleUpload (single-file) and runBatchItem (batch) so the
+    // two paths never diverge (see OCR_TESTING_LOG §2.4 — batch/single-file
+    // symmetry has bitten us before). For a source File, produces the exact
+    // File to upload PLUS a list of per-field crop Blobs generated from the
+    // same rendered pixels. Non-hinted fields contribute nothing → crops[] empty.
+    const prepareUploadWithCrops = useCallback(async (
+        source: File,
+        /** UI-1: 1-based ORIGINAL PDF page numbers to include. Empty / omitted
+         *  = "send the whole document" (no re-raster, no `pages` part). When
+         *  non-empty AND the selection differs from "all pages in order", we
+         *  re-run the pdfjs raster with `opts.pages` so the uploaded stacked
+         *  PNG only contains those tiles — that's how issue 1.3 actually
+         *  shrinks (server just enforces the cap; the client owns the cut). */
+        selection?: number[],
+    ): Promise<{
+        uploadFile: File;
+        crops: Awaited<ReturnType<typeof buildFieldCrops>>;
+        /** Effective 1-based ORIGINAL page numbers ACTUALLY rendered into
+         *  `uploadFile`. `[]` when no PDF subset was applied. Callers use this
+         *  as the `pages` FormData part (Path A metadata for the server). */
+        renderedPages: number[];
+        /** Source PDF's real page count when available (from pdfRaster).
+         *  `null` for non-PDF files. */
+        totalPages: number | null;
+    }> => {
+        let uploadFile: File = source;
+        let pageRects: StackedPageRect[] | null = null;
+        let renderedPages: number[] = [];
+        let totalPages: number | null = null;
+        if (source.type === "application/pdf") {
+            try {
+                const cachedFull = pdfRaster && pdfRaster.sourceFile === source
+                    ? pdfRaster.result
+                    : null;
+                totalPages = cachedFull ? cachedFull.pageNumbers.length : null;
+                // Decide whether the caller's selection actually differs from
+                // "render every page in order". If it doesn't, reuse the
+                // cached full raster (batch mode + single-page cases both hit
+                // this fast path).
+                const wantsSubset = Array.isArray(selection)
+                    && selection.length > 0
+                    && cachedFull
+                    && !(selection.length === cachedFull.pageNumbers.length
+                         && selection.every((p, i) => p === cachedFull.pageNumbers[i]));
+                let detailed;
+                if (wantsSubset) {
+                    // Re-raster with the picked pages only. Preview stays on
+                    // the full raster (thumbnails still show every page), so
+                    // this second call is upload-only.
+                    detailed = await pdfFileToImageDetailed(source, { pages: selection! });
+                } else if (cachedFull) {
+                    detailed = cachedFull;
+                } else {
+                    detailed = await pdfFileToImageDetailed(source);
+                }
+                uploadFile = detailed.file;
+                pageRects = detailed.pageRects;
+                renderedPages = detailed.pageNumbers.slice();
+                if (totalPages === null) totalPages = detailed.pageNumbers.length;
+            } catch (err) {
+                console.error("[ocr] pdf→image conversion failed, sending raw PDF", err);
+            }
+        }
+        const anyHint = extractFields.some(f => f.bbox_hint);
+        let crops: Awaited<ReturnType<typeof buildFieldCrops>> = [];
+        if (anyHint) {
+            try {
+                // API-1 Path A: pass the ORIGINAL page selection so
+                // buildFieldCrops can translate `bbox_hint.page` → rendered
+                // index. Hints whose page was deselected are silently dropped
+                // (crop pass reflects what's actually in the upload).
+                crops = await buildFieldCrops(uploadFile, extractFields, pageRects, renderedPages);
+            } catch (err) {
+                // Crop generation is a best-effort augmentation — if it fails,
+                // fall back to the whole-image-only path (unchanged behavior).
+                console.warn("[ocr-6] crop generation failed, continuing without crops", err);
+                crops = [];
+            }
+        }
+        return { uploadFile, crops, renderedPages, totalPages };
+    }, [extractFields, pdfRaster]);
+
+    /** Append crop blobs + field_crops JSON to a FormData already containing
+     *  the whole-image `file` + `fields_json`. Safe to call with an empty
+     *  crops array — no parts added, server behavior is unchanged (backward compat).
+     */
+    const appendCropsToFormData = useCallback((
+        fd: FormData,
+        crops: Awaited<ReturnType<typeof buildFieldCrops>>,
+    ) => {
+        if (crops.length === 0) return;
+        const meta = crops.map((c, i) => ({ index: i, fieldName: c.fieldName, page: c.page }));
+        fd.append("field_crops", JSON.stringify(meta));
+        crops.forEach((c, i) => {
+            fd.append(`crop_${i}`, new File([c.blob], `crop_${i}.png`, { type: "image/png" }));
+        });
+    }, []);
+
+    /** UI-1 / API-1: append `pages` (JSON) + `total_pages` (int) to a
+     *  multipart body when a PDF subset was applied. No-op for non-PDF and
+     *  full-doc uploads so the server keeps today's contract byte-for-byte
+     *  when nothing was picked. */
+    const appendPagesToFormData = useCallback((
+        fd: FormData,
+        renderedPages: number[],
+        totalPages: number | null,
+    ) => {
+        if (totalPages !== null && totalPages > 0) {
+            fd.append("total_pages", String(totalPages));
+        }
+        // Only send `pages` when a subset (not the whole doc) was actually
+        // rendered — matches server semantics (`pages` present = "this is a
+        // filtered selection"). Full-doc uploads omit it and rely solely on
+        // `total_pages` for the cap check.
+        if (
+            renderedPages.length > 0
+            && totalPages !== null
+            && !(renderedPages.length === totalPages
+                 && renderedPages.every((p, i) => p === i + 1))
+        ) {
+            fd.append("pages", JSON.stringify(renderedPages));
+        }
+    }, []);
+
     // ── Upload + Poll ──
     const handleUpload = async () => {
         if (!file) return;
@@ -431,10 +884,28 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
         setProgress(10);
         setProcessingStep(t("ocr.extracting"));
 
+        // Convert PDFs to a hi-DPI PNG before upload so Gemini gets sharper
+        // Thai text (server-side PDF rendering was too low-res and caused
+        // misreads like "ช็อคบอล" → "คอบอล"). Image / docx / xlsx paths are
+        // unchanged; docx was already flattened earlier in processFile.
+        // OCR-6: also generate per-field crops from the same rendered pixels
+        // so the server can run a focused second AI call on hinted fields.
+        setProcessingStep(t("ocr.extracting"));
+        // UI-1: honour the page-picker selection (single-file path). Empty
+        // selection is only reachable for non-PDF and single-page PDFs;
+        // multi-page PDFs default-select and the Extract button is disabled
+        // when the user manually clears everything.
+        const { uploadFile, crops, renderedPages, totalPages } = await prepareUploadWithCrops(file, selectedPages);
+
         const formData = new FormData();
-        formData.append("file", file);
+        formData.append("file", uploadFile);
         if (user) formData.append("userId", user.id);
         formData.append("fields", extractFields.map(f => f.type !== "text" ? `${f.name} (${f.type})` : f.name).join(", "));
+        // Full field spec including bbox hints — server prefers this when present
+        // and falls back to the string above so old templates keep working.
+        formData.append("fields_json", JSON.stringify(extractFields));
+        appendCropsToFormData(formData, crops);
+        appendPagesToFormData(formData, renderedPages, totalPages);
 
         try {
             setProgress(30);
@@ -475,8 +946,15 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
                 if (data.status === "completed") {
                     clearInterval(interval);
                     setResult(data.data);
+                    setResultFieldsSig(extractFields.map(f => f.name).join("|"));
                     setIsExpandedView(true);
                     setProgress(100);
+                    // Auto-capture bbox hints from this run so the next OCR on
+                    // the same template can use them as spatial anchors. Only
+                    // fields with confidence ≥ 80 + a valid bbox get captured,
+                    // and only when the template doesn't already carry a hint
+                    // (user tweaks aren't overwritten).
+                    captureBboxHints(data.data);
                     // Personalised "average credits per run" — feeds the T2
                     // (relative spike) confirm trigger on subsequent runs.
                     recordCreditUse(estimateCredits({ operation: "ocr", fields: extractFields.length }).credits);
@@ -504,6 +982,7 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
             updateBatchItem(item.id, { status: "processing", error: undefined });
 
             // .docx flatten to PNG before upload, same as single-file path.
+            // For PDFs, prepareUploadWithCrops handles the pdfjs render internally.
             let toUpload = item.file;
             const isDocx = item.file.name.toLowerCase().endsWith(".docx")
                 || item.file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
@@ -511,15 +990,32 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
                 try {
                     toUpload = await docxFileToImage(item.file);
                 } catch (e: any) {
-                    updateBatchItem(item.id, { status: "error", error: t("ocr.convertDocxFailed", { msg: e?.message || "unknown" }) });
+                    console.error("[batch] DOCX→image conversion failed", e);
+                    updateBatchItem(item.id, { status: "error", error: t("ocr.convertDocxFailed") });
                     return;
                 }
             }
+            // Shared prep with single-file path (PDF→PNG + per-field crops).
+            // OCR-6: batch MUST behave symmetrically — divergent batch/single
+            // paths have regressed us before (see OCR_TESTING_LOG §2.4).
+            // UI-1: batch does NOT expose a per-file page picker in v1 —
+            // the spec explicitly asks for the same selection to flow through
+            // both paths, not a fresh UI for each batch row. Reuse whatever
+            // the single-file picker most recently chose. Files with fewer
+            // pages than the selection are safe because pdfFileToImageDetailed
+            // silently drops out-of-range entries (see selection cleanup in
+            // that helper). Files where NONE of the picked pages exist fall
+            // through to a full-doc render (matches today's batch behaviour).
+            const batchSelection = selectedPages;
+            const { uploadFile: prepared, crops, renderedPages, totalPages } = await prepareUploadWithCrops(toUpload, batchSelection);
 
             const fd = new FormData();
-            fd.append("file", toUpload);
+            fd.append("file", prepared);
             if (user) fd.append("userId", user.id);
             fd.append("fields", fieldList);
+            fd.append("fields_json", JSON.stringify(extractFields));
+            appendCropsToFormData(fd, crops);
+            appendPagesToFormData(fd, renderedPages, totalPages);
 
             const uploadResp = await fetchJson<{ documentId?: string }>("/api/upload", { method: "POST", body: fd });
             if (!uploadResp.ok) {
@@ -561,9 +1057,10 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
                 } catch { /* transient network error — keep polling */ }
             }
         } catch (e: any) {
-            updateBatchItem(item.id, { status: "error", error: e?.message || "unknown" });
+            console.error("[batch] runBatchItem failed", e);
+            updateBatchItem(item.id, { status: "error", error: apiError(e?.code || ErrorCode.PROCESSING_FAILED, e?.vars, t) });
         }
-    }, [extractFields, user, updateBatchItem, t]);
+    }, [extractFields, user, updateBatchItem, t, prepareUploadWithCrops, appendCropsToFormData, appendPagesToFormData, selectedPages]);
 
     const runBatch = useCallback(async () => {
         if (batchItems.length === 0 || batchRunning) return;
@@ -649,7 +1146,9 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
 
     const resetWorkspace = () => {
         setFile(null);
+        previews.forEach(p => URL.revokeObjectURL(p));
         setPreviews([]);
+        setPdfRaster(null);
         setResult(null);
         setError(null);
         setDocId(null);
@@ -1025,23 +1524,71 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
                     }}>
                         {extractFields.map(f => {
                             const c = TYPE_COLOR[f.type] || ACCENT;
+                            const isDragging = draggingFieldId === f.id;
+                            const isDropTarget = dropTargetFieldId === f.id && draggingFieldId && draggingFieldId !== f.id;
                             return (
                                 <button
                                     key={f.id}
                                     className="ocr-field-chip"
+                                    draggable
+                                    onDragStart={(e) => {
+                                        setDraggingFieldId(f.id);
+                                        e.dataTransfer.effectAllowed = "move";
+                                        // Required by Firefox to actually start a drag.
+                                        e.dataTransfer.setData("text/plain", f.id);
+                                    }}
+                                    onDragEnter={() => setDropTargetFieldId(f.id)}
+                                    onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; }}
+                                    onDrop={(e) => {
+                                        e.preventDefault();
+                                        if (draggingFieldId) reorderField(draggingFieldId, f.id);
+                                        setDraggingFieldId(null);
+                                        setDropTargetFieldId(null);
+                                    }}
+                                    onDragEnd={() => { setDraggingFieldId(null); setDropTargetFieldId(null); }}
                                     onClick={() => setExtractFields(prev => prev.filter(x => x.id !== f.id))}
                                     style={{
                                         display: "inline-flex", alignItems: "center", gap: 5,
-                                        padding: "5px 10px", borderRadius: 6, cursor: "pointer",
-                                        border: `1px solid ${c}55`, background: `${c}18`,
+                                        padding: "5px 10px", borderRadius: 6,
+                                        cursor: isDragging ? "grabbing" : "grab",
+                                        border: `1px solid ${isDropTarget ? c : `${c}55`}`,
+                                        background: `${c}18`,
                                         color: c, fontSize: 12.5, fontWeight: 600,
+                                        opacity: isDragging ? 0.35 : 1,
+                                        boxShadow: isDropTarget ? `0 0 0 2px ${c}66` : "none",
                                         ["--chip-color" as any]: c,
-                                        transition: "background 0.15s, border-color 0.15s, transform 0.15s, box-shadow 0.15s",
+                                        transition: "background 0.15s, border-color 0.15s, transform 0.15s, box-shadow 0.15s, opacity 0.15s",
                                     }}
-                                    title="Click to remove"
+                                    title="Click to remove · Drag to reorder"
                                 >
-                                    <span style={{ fontSize: 9, opacity: 0.8, textTransform: "uppercase" }}>{f.type}</span>
+                                    <span style={{ fontSize: 9, opacity: 0.8, textTransform: "uppercase" }}>{TYPE_LABEL[f.type] || f.type}</span>
                                     {f.name}
+                                    {/* Pin: click to enter draw mode for this field's bbox_hint.
+                                        Filled when a hint exists, outlined otherwise. Shift-click
+                                        clears the hint without opening the editor. */}
+                                    <span
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            if (e.shiftKey && f.bbox_hint) {
+                                                setExtractFields(prev => prev.map(x => x.id === f.id ? { ...x, bbox_hint: undefined } : x));
+                                                return;
+                                            }
+                                            setHintEditingFieldId(hintEditingFieldId === f.id ? null : f.id);
+                                        }}
+                                        title={f.bbox_hint
+                                            ? `ตำแหน่งบันทึกไว้ (คลิกเพื่อวาดใหม่, Shift+คลิกเพื่อล้าง)`
+                                            : "คลิกเพื่อกำหนดตำแหน่งบนเอกสาร"}
+                                        style={{
+                                            display: "inline-flex", alignItems: "center",
+                                            padding: "1px 3px", borderRadius: 3,
+                                            background: hintEditingFieldId === f.id ? "#dc2626" : "transparent",
+                                            color: hintEditingFieldId === f.id ? "#fff"
+                                                 : f.bbox_hint ? c : "var(--color-text-4)",
+                                            opacity: f.bbox_hint || hintEditingFieldId === f.id ? 1 : 0.6,
+                                        }}
+                                    >
+                                        <Icon.Pin width={10} height={10} />
+                                    </span>
                                     <Icon.X width={10} height={10} />
                                 </button>
                             );
@@ -1082,7 +1629,7 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
                                     minWidth: 90, justifyContent: "space-between",
                                 }}
                             >
-                                {newFieldType} <Icon.ChevronDown width={10} height={10} />
+                                {TYPE_LABEL[newFieldType] || newFieldType} <Icon.ChevronDown width={10} height={10} />
                             </button>
                             {isTypeDropdownOpen && (
                                 <>
@@ -1112,7 +1659,7 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
                                                 }}
                                             >
                                                 <span style={{ width: 6, height: 6, borderRadius: "50%", background: TYPE_COLOR[typ] }} />
-                                                {typ}
+                                                {TYPE_LABEL[typ] || typ}
                                             </button>
                                         ))}
                                     </div>
@@ -1287,7 +1834,9 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
                                     )}
                                 </div>
 
-                                <div style={{
+                                <div
+                                    {...panZoom.containerProps}
+                                    style={{
                                     // Always overflow:auto — the docx/image branch uses width:100%
                                     // height:auto, so a tall portrait scan needs vertical scroll at
                                     // zoom=1 too, not only when zoomed in.
@@ -1301,6 +1850,7 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
                                     alignItems: "safe center",
                                     justifyContent: "safe center",
                                     background: "var(--color-bg-body)",
+                                    ...panZoom.containerProps.style,
                                 }}>
                                     {converting === "docx" && (
                                         <div style={{
@@ -1314,6 +1864,11 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
                                             {t("ocr.convertingDocx")}
                                         </div>
                                     )}
+                                    {/* Scan-line overlay while OCR is running. Pure CSS; gated by a
+                                        feature flag so we can revert by flipping a single constant. */}
+                                    {ENABLE_OCR_SCAN_LINE && loading && file && (
+                                        <div className="docroom-scan-line" aria-hidden />
+                                    )}
                                     {file && isExcelFile(file) ? (
                                         <div style={{ position: "absolute", inset: 0 }}>
                                             {/* CSS `zoom` works here because ExcelPreview has its own
@@ -1323,48 +1878,42 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
                                             </div>
                                         </div>
                                     ) : previews[previewPage] && (
-                                        file?.type === "application/pdf"
-                                            // Wrap iframe in a sized div instead of sizing the iframe
-                                            // itself — `<iframe>` is a replaced element and `width: N%`
-                                            // applied directly to it in a flex container can be clamped
-                                            // by the flex layout. Sizing the wrapper div (block element)
-                                            // and letting the iframe fill it 100% gives the same result
-                                            // for the PDF viewer (`view=FitH` re-fits to the wrapper)
-                                            // without the flex sizing weirdness.
-                                            ? <div style={{
-                                                width: `${100 * zoom}%`,
-                                                height: `${100 * zoom}%`,
-                                                minWidth: "100%",
-                                                minHeight: "100%",
-                                                flexShrink: 0,
-                                            }}>
-                                                <iframe
-                                                    src={`${previews[previewPage]}#toolbar=0&navpanes=0&view=FitH`}
-                                                    style={{
-                                                        width: "100%", height: "100%", border: 0,
-                                                        display: "block",
-                                                    }}
-                                                />
-                                              </div>
-                                            // Image (incl. docx-flattened PNG): same wrapper pattern
-                                            // for the same flex-layout reason. Wrapper width is
-                                            // 100×zoom%; image fills wrapper width with height:auto.
-                                            // At zoom=1 the image renders at the wrapper's natural
-                                            // width (matches Compare workspace's "100% = real size").
-                                            : <div style={{
-                                                width: `${100 * zoom}%`,
-                                                flexShrink: 0,
-                                                display: "block",
-                                            }}>
-                                                <img
-                                                    src={previews[previewPage]}
-                                                    alt="Preview"
-                                                    style={{
-                                                        width: "100%", height: "auto",
-                                                        display: "block",
-                                                    }}
-                                                />
-                                              </div>
+                                        // OCR-6c: PDF and image previews now share ONE code path.
+                                        // Both render the actual raster pixels as `<img>` with
+                                        // width:100% + height:auto, so the wrapper's client rect
+                                        // == the rendered page rect. Hint fractions measured
+                                        // against the wrapper ARE page-space fractions — no
+                                        // letterbox, no wrapper-vs-page mismatch. Aspect ratio
+                                        // comes from the actual rendered page dims (from pdfjs)
+                                        // for PDFs; the browser derives it from the image intrinsic
+                                        // size for docx/image previews.
+                                        <div style={{
+                                            width: `${100 * zoom}%`,
+                                            flexShrink: 0,
+                                            display: "block",
+                                            position: "relative",  // anchor for bbox-hint overlay
+                                            ...(previewPageAspect && previewPageAspect[previewPage]
+                                                ? { aspectRatio: previewPageAspect[previewPage] }
+                                                : null),
+                                        }}>
+                                            <img
+                                                src={previews[previewPage]}
+                                                alt="Preview"
+                                                draggable={false}
+                                                style={{
+                                                    width: "100%", height: "auto",
+                                                    display: "block",
+                                                }}
+                                            />
+                                            <BboxHintLayer
+                                                fields={extractFields}
+                                                currentPage={previewPage + 1}
+                                                editingFieldId={hintEditingFieldId}
+                                                draw={hintDraw}
+                                                onDrawUpdate={setHintDraw}
+                                                onDrawCommit={(fid, r) => { commitHintDraw(fid, r); setHintDraw(null); setHintEditingFieldId(null); }}
+                                            />
+                                        </div>
                                     )}
                                     {previews.length > 1 && (
                                         <div style={{
@@ -1405,6 +1954,23 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
                                     )}
                                 </div>
 
+                                {/* UI-1: page picker — only when the loaded doc is a multi-page
+                                    PDF and we still have room to run (no result yet). Single-page
+                                    PDFs, images, docx and xlsx don't render the picker. */}
+                                {!result && showPagePicker && (
+                                    <PagePicker
+                                        previews={previews}
+                                        pageCount={totalPagesInDoc}
+                                        selectedPages={selectedPages}
+                                        onToggle={togglePageSelection}
+                                        onSelectAll={selectAllPages}
+                                        onSelectNone={selectNonePages}
+                                        max={PAGE_SELECTION_MAX}
+                                        pickerHint={pickerHint}
+                                        t={t}
+                                    />
+                                )}
+
                                 {/* Extract CTA — only when no result yet */}
                                 {!result && (
                                     <div style={{
@@ -1414,14 +1980,15 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
                                     }}>
                                         <button
                                             onClick={tryRun}
-                                            disabled={loading || extractFields.length === 0}
+                                            disabled={loading || extractFields.length === 0 || (showPagePicker && selectedPages.length === 0)}
+                                            title={showPagePicker && selectedPages.length === 0 ? t("ocr.pagePicker.selectAtLeastOne") : undefined}
                                             style={{
                                                 width: "100%", padding: "10px 16px",
-                                                background: loading || extractFields.length === 0 ? "var(--color-bg-elevated)" : ACCENT,
-                                                color: loading || extractFields.length === 0 ? "var(--color-text-3)" : "#fff",
+                                                background: (loading || extractFields.length === 0 || (showPagePicker && selectedPages.length === 0)) ? "var(--color-bg-elevated)" : ACCENT,
+                                                color: (loading || extractFields.length === 0 || (showPagePicker && selectedPages.length === 0)) ? "var(--color-text-3)" : "#fff",
                                                 border: "none", borderRadius: 8,
                                                 fontSize: 13, fontWeight: 700,
-                                                cursor: loading || extractFields.length === 0 ? "not-allowed" : "pointer",
+                                                cursor: (loading || extractFields.length === 0 || (showPagePicker && selectedPages.length === 0)) ? "not-allowed" : "pointer",
                                                 display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
                                             }}
                                         >
@@ -1453,6 +2020,33 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
                                                     height: "100%", width: `${progress}%`,
                                                     background: ACCENT, transition: "width 0.4s",
                                                 }} />
+                                            </div>
+                                        )}
+                                        {/* Mini story — 5-step checklist driven by `progress`.
+                                            Gated by a feature flag so we can revert by flipping
+                                            the constant in featureFlags.ts. */}
+                                        {ENABLE_LOADING_STORY && loading && progress > 0 && (
+                                            <div style={{ marginTop: 10, padding: "8px 4px" }}>
+                                                {LOADING_STORY_STEPS.map((step, i) => {
+                                                    const prevEnd = i === 0 ? 0 : LOADING_STORY_STEPS[i - 1].endAt;
+                                                    const state =
+                                                        progress >= step.endAt ? "done"
+                                                            : progress >= prevEnd ? "active"
+                                                                : "pending";
+                                                    return (
+                                                        <div
+                                                            key={step.key}
+                                                            className={`docroom-story-step docroom-story-${state}`}
+                                                        >
+                                                            <span className="docroom-story-dot">
+                                                                {state === "done" && (
+                                                                    <Icon.Check width={10} height={10} />
+                                                                )}
+                                                            </span>
+                                                            <span>{t(`ocr.${step.key}`)}</span>
+                                                        </div>
+                                                    );
+                                                })}
                                             </div>
                                         )}
                                     </div>
@@ -1599,9 +2193,14 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
                                             </tr>
                                         </thead>
                                         <tbody>
-                                            {Object.entries(result).map(([key, item]: [string, any]) => {
+                                            {Object.entries(result).map(([key, item]: [string, any], rowIdx) => {
                                                 const val = (item && typeof item === "object" && "value" in item) ? item.value : item;
                                                 const conf = (item && typeof item === "object" && "confidence" in item) ? Number(item.confidence) : null;
+                                                // AI-reported spelling corrections. Prompt asks the model to
+                                                // list every word it auto-corrected so the user can catch
+                                                // wrong "helpful" edits (e.g. Plastelet → Platelet).
+                                                const corrections: Array<{ original: string; corrected: string; reason?: string }> =
+                                                    (item && typeof item === "object" && Array.isArray(item.corrections)) ? item.corrections : [];
                                                 const confColor = conf == null
                                                     ? "var(--color-text-3)"
                                                     : conf >= 80 ? "var(--color-success)"
@@ -1617,7 +2216,15 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
                                                     return String(v);
                                                 };
                                                 return (
-                                                    <tr key={key} style={{ borderTop: "1px solid var(--color-border)" }}>
+                                                    <tr
+                                                        key={key}
+                                                        className={ENABLE_FIELD_POP ? "docroom-field-pop" : undefined}
+                                                        style={{
+                                                            borderTop: "1px solid var(--color-border)",
+                                                            // Stagger each row by ~80ms; cap so 20+ field tables don't lag.
+                                                            ...(ENABLE_FIELD_POP ? { animationDelay: `${Math.min(rowIdx, 14) * 0.08}s` } : {}),
+                                                        }}
+                                                    >
                                                         <td style={{ padding: "9px 12px", verticalAlign: "top" }}>
                                                             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                                                                 <span style={{
@@ -1626,7 +2233,38 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
                                                                     fontWeight: 600, textTransform: "uppercase",
                                                                 }}>{typeHint}</span>
                                                                 <span style={{ color: "var(--color-text-2)" }}>{key.replace(/_/g, " ")}</span>
+                                                                {corrections.length > 0 && (
+                                                                    <span
+                                                                        title={corrections.map(c => `"${c.original}" → "${c.corrected}"${c.reason ? ` (${c.reason})` : ""}`).join("\n")}
+                                                                        style={{
+                                                                            fontSize: 9.5, fontWeight: 700,
+                                                                            background: "rgba(245,158,11,0.15)",
+                                                                            color: "#f59e0b",
+                                                                            padding: "2px 6px", borderRadius: 4,
+                                                                            border: "1px solid rgba(245,158,11,0.35)",
+                                                                            cursor: "help",
+                                                                            display: "inline-flex", alignItems: "center", gap: 3,
+                                                                        }}
+                                                                    >
+                                                                        ✎ แก้คำ {corrections.length}
+                                                                    </span>
+                                                                )}
                                                             </div>
+                                                            {corrections.length > 0 && (
+                                                                <div style={{
+                                                                    marginTop: 4, fontSize: 10.5,
+                                                                    color: "var(--color-text-3)",
+                                                                    lineHeight: 1.4,
+                                                                }}>
+                                                                    {corrections.map((c, ci) => (
+                                                                        <div key={ci}>
+                                                                            <span style={{ textDecoration: "line-through", color: "var(--color-danger)" }}>{c.original}</span>
+                                                                            {" → "}
+                                                                            <span style={{ color: "var(--color-success)", fontWeight: 600 }}>{c.corrected}</span>
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            )}
                                                         </td>
                                                         <td style={{ padding: "9px 12px", color: "var(--color-text-1)", fontWeight: 500 }}>
                                                             {isTable ? (
@@ -1673,22 +2311,37 @@ export default function OCRWorkspace({ user, onDocumentProcessed, onNavigateToBi
                                                                         </tbody>
                                                                     </table>
                                                                 </div>
-                                                            ) : (
-                                                                <input
-                                                                    type="text"
-                                                                    value={fmt(val)}
-                                                                    onChange={e => updateField(key, e.target.value)}
-                                                                    placeholder="—"
-                                                                    style={{
-                                                                        width: "100%",
-                                                                        background: "transparent",
-                                                                        border: "1px solid transparent",
-                                                                        padding: "3px 6px", borderRadius: 4,
-                                                                        color: "var(--color-text-1)",
-                                                                        fontSize: 12.5, outline: "none",
-                                                                    }}
-                                                                />
-                                                            )}
+                                                            ) : (() => {
+                                                                // Multi-line values (address, long names) need a textarea
+                                                                // to render \n visually — <input> collapses newlines.
+                                                                const shown = fmt(val);
+                                                                const isMulti = /\n/.test(shown);
+                                                                const commonStyle: React.CSSProperties = {
+                                                                    width: "100%",
+                                                                    background: "transparent",
+                                                                    border: "1px solid transparent",
+                                                                    padding: "3px 6px", borderRadius: 4,
+                                                                    color: "var(--color-text-1)",
+                                                                    fontSize: 12.5, outline: "none",
+                                                                };
+                                                                return isMulti ? (
+                                                                    <textarea
+                                                                        value={shown}
+                                                                        onChange={e => updateField(key, e.target.value)}
+                                                                        placeholder="—"
+                                                                        rows={Math.min(6, shown.split("\n").length)}
+                                                                        style={{ ...commonStyle, resize: "vertical", fontFamily: "inherit", lineHeight: 1.4 }}
+                                                                    />
+                                                                ) : (
+                                                                    <input
+                                                                        type="text"
+                                                                        value={shown}
+                                                                        onChange={e => updateField(key, e.target.value)}
+                                                                        placeholder="—"
+                                                                        style={commonStyle}
+                                                                    />
+                                                                );
+                                                            })()}
                                                         </td>
                                                         <td style={{ padding: "9px 12px", textAlign: "center", verticalAlign: "top" }}>
                                                             {conf != null && (
@@ -1754,6 +2407,310 @@ interface TemplateGroupProps {
     onSetDefault?: (id: string | null, e: React.MouseEvent) => void;
     pinLabel?: string;
     pinnedLabel?: string;
+}
+
+// ─── Bbox hint layer ─────────────────────────────────────────────────────────
+// Overlays the document preview so the user can (a) see stored bbox_hint
+// rectangles per field, and (b) drag out a new rectangle when a field is
+// selected for editing. Uses percentage coords so it scales with the parent
+// wrapper's zoom width. Mouse-events on the layer only intercept when a
+// field is being edited — otherwise pointer-events fall through to the
+// pan/zoom container so scroll + pan keep working.
+interface BboxHintLayerProps {
+    fields: ExtractField[];
+    currentPage: number;
+    editingFieldId: string | null;
+    draw: { x0: number; y0: number; x1: number; y1: number } | null;
+    onDrawUpdate: (d: { x0: number; y0: number; x1: number; y1: number } | null) => void;
+    onDrawCommit: (fieldId: string, r: { x0: number; y0: number; x1: number; y1: number }) => void;
+}
+function BboxHintLayer({ fields, currentPage, editingFieldId, draw, onDrawUpdate, onDrawCommit }: BboxHintLayerProps) {
+    const layerRef = useRef<HTMLDivElement>(null);
+    const editing = fields.find(f => f.id === editingFieldId) || null;
+    const isEditing = !!editing;
+
+    const getRelCoords = (e: React.MouseEvent) => {
+        const el = layerRef.current;
+        if (!el) return { x: 0, y: 0 };
+        const r = el.getBoundingClientRect();
+        return {
+            x: Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)),
+            y: Math.max(0, Math.min(1, (e.clientY - r.top) / r.height)),
+        };
+    };
+
+    return (
+        <div
+            ref={layerRef}
+            onMouseDown={isEditing ? (e) => {
+                e.preventDefault();
+                const p = getRelCoords(e);
+                onDrawUpdate({ x0: p.x, y0: p.y, x1: p.x, y1: p.y });
+            } : undefined}
+            onMouseMove={isEditing && draw ? (e) => {
+                const p = getRelCoords(e);
+                onDrawUpdate({ ...draw, x1: p.x, y1: p.y });
+            } : undefined}
+            onMouseUp={isEditing && draw && editing ? () => {
+                onDrawCommit(editing.id, draw);
+            } : undefined}
+            style={{
+                position: "absolute", inset: 0,
+                pointerEvents: isEditing ? "auto" : "none",
+                cursor: isEditing ? "crosshair" : "default",
+                zIndex: 10,
+                // subtle scrim while editing so user sees they're in draw mode
+                background: isEditing ? "rgba(0,0,0,0.12)" : "transparent",
+            }}
+        >
+            {/* Existing hints — visible always so user can see stored positions */}
+            {fields.map(f => {
+                const b = f.bbox_hint;
+                if (!b) return null;
+                if ((b.page || 1) !== currentPage) return null;
+                const isEditingThis = editingFieldId === f.id;
+                return (
+                    <div key={f.id} style={{
+                        position: "absolute",
+                        left: `${b.x * 100}%`, top: `${b.y * 100}%`,
+                        width: `${b.width * 100}%`, height: `${b.height * 100}%`,
+                        border: `1.5px ${isEditingThis ? "dashed" : "solid"} rgba(220,38,38,0.85)`,
+                        background: "rgba(220,38,38,0.08)",
+                        borderRadius: 2,
+                        pointerEvents: "none",
+                    }}>
+                        <span style={{
+                            position: "absolute", top: -18, left: 0,
+                            fontSize: 9, fontWeight: 700, background: "rgba(220,38,38,0.9)",
+                            color: "#fff", padding: "1px 5px", borderRadius: 3,
+                            whiteSpace: "nowrap",
+                        }}>📍 {f.name}</span>
+                    </div>
+                );
+            })}
+            {/* Live drag preview */}
+            {draw && isEditing && (
+                <div style={{
+                    position: "absolute",
+                    left: `${Math.min(draw.x0, draw.x1) * 100}%`,
+                    top: `${Math.min(draw.y0, draw.y1) * 100}%`,
+                    width: `${Math.abs(draw.x1 - draw.x0) * 100}%`,
+                    height: `${Math.abs(draw.y1 - draw.y0) * 100}%`,
+                    border: "2px solid #dc2626",
+                    background: "rgba(220,38,38,0.15)",
+                    pointerEvents: "none",
+                }} />
+            )}
+            {/* Instruction banner while editing */}
+            {isEditing && !draw && (
+                <div style={{
+                    position: "absolute", top: 10, left: "50%", transform: "translateX(-50%)",
+                    background: "rgba(220,38,38,0.92)", color: "#fff",
+                    padding: "4px 12px", borderRadius: 12,
+                    fontSize: 11.5, fontWeight: 600,
+                    pointerEvents: "none",
+                    whiteSpace: "nowrap",
+                }}>
+                    📍 ลาก mouse เพื่อกำหนดตำแหน่งของ "{editing?.name}" · Esc = ยกเลิก
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ─── Page picker (UI-1) ──────────────────────────────────────────────────────
+// Thumbnail grid shown between the preview and the Extract CTA for multi-page
+// PDFs. Reuses the per-page PNG blob URLs already produced by OCR-6c
+// (`pdfRaster.result.pagePngs` → same blobs the preview `<img>` renders), so
+// this component does NOT re-run pdfjs — thumbnails are byte-identical to the
+// preview and cost nothing extra beyond the DOM. Selection is stored in the
+// parent as 1-based ORIGINAL page numbers so it survives the API-1 Path A
+// contract end-to-end.
+interface PagePickerProps {
+    previews: string[];
+    pageCount: number;
+    selectedPages: number[];
+    onToggle: (page: number) => void;
+    onSelectAll: () => void;
+    onSelectNone: () => void;
+    max: number;
+    pickerHint: string | null;
+    t: (key: string, vars?: Record<string, string | number>) => string;
+}
+function PagePicker({ previews, pageCount, selectedPages, onToggle, onSelectAll, onSelectNone, max, pickerHint, t }: PagePickerProps) {
+    const over = pageCount > max;
+    // Collapsed view hides thumbnails/banners and only shows header + counts +
+    // toggle so the picker doesn't eat vertical space once the user has picked.
+    const [collapsed, setCollapsed] = useState(false);
+    return (
+        <div
+            style={{
+                padding: "10px 12px",
+                borderTop: "1px solid var(--color-border)",
+                background: "var(--color-bg-surface)",
+                flexShrink: 0,
+                maxHeight: collapsed ? undefined : 220,
+                overflowY: collapsed ? "visible" : "auto",
+            }}
+            className="custom-scrollbar"
+        >
+            <div style={{
+                display: "flex", alignItems: "center", gap: 10,
+                marginBottom: collapsed ? 0 : 8,
+                flexWrap: "wrap",
+            }}>
+                <span style={{
+                    fontSize: 10, fontWeight: 700, letterSpacing: 0.8,
+                    textTransform: "uppercase", color: "var(--color-text-3)",
+                }}>
+                    {t("ocr.pagePicker.title")}
+                </span>
+                <span style={{ fontSize: 11, color: "var(--color-text-3)" }}>
+                    {t("ocr.pagePicker.selectedCount", { n: selectedPages.length, max })}
+                </span>
+                <div style={{ flex: 1 }} />
+                {!collapsed && (
+                    <>
+                        <button
+                            onClick={onSelectAll}
+                            style={{
+                                background: "transparent",
+                                border: "1px solid var(--color-border)",
+                                color: "var(--color-text-2)", borderRadius: 6,
+                                padding: "4px 10px", fontSize: 11, fontWeight: 600,
+                                cursor: "pointer",
+                            }}
+                        >
+                            {t("ocr.pagePicker.selectAll")}
+                        </button>
+                        <button
+                            onClick={onSelectNone}
+                            style={{
+                                background: "transparent",
+                                border: "1px solid var(--color-border)",
+                                color: "var(--color-text-2)", borderRadius: 6,
+                                padding: "4px 10px", fontSize: 11, fontWeight: 600,
+                                cursor: "pointer",
+                            }}
+                        >
+                            {t("ocr.pagePicker.selectNone")}
+                        </button>
+                    </>
+                )}
+                <button
+                    onClick={() => setCollapsed(c => !c)}
+                    title={collapsed ? t("ocr.pagePicker.expand") : t("ocr.pagePicker.collapse")}
+                    style={{
+                        background: "transparent",
+                        border: "1px solid var(--color-border)",
+                        color: "var(--color-text-2)", borderRadius: 6,
+                        padding: "4px 8px", fontSize: 11, fontWeight: 600,
+                        cursor: "pointer",
+                        display: "inline-flex", alignItems: "center", gap: 4,
+                    }}
+                >
+                    <Icon.ChevronDown width={12} height={12} style={{ transform: collapsed ? "rotate(0deg)" : "rotate(180deg)", transition: "transform 0.15s" }} />
+                    {collapsed ? t("ocr.pagePicker.expand") : t("ocr.pagePicker.collapse")}
+                </button>
+            </div>
+            {!collapsed && over && (
+                <div style={{
+                    marginBottom: 8, padding: "6px 10px",
+                    borderRadius: 6,
+                    background: "rgba(245,158,11,0.13)",
+                    border: "1px solid rgba(245,158,11,0.35)",
+                    color: "#f59e0b", fontSize: 11.5, fontWeight: 600,
+                }}>
+                    {t("ocr.pagePicker.tooManyPagesWarning", { actual: pageCount, limit: max })}
+                </div>
+            )}
+            {!collapsed && pickerHint && (
+                <div style={{
+                    marginBottom: 8, padding: "5px 10px",
+                    borderRadius: 6,
+                    background: "rgba(220,38,38,0.12)",
+                    border: "1px solid rgba(220,38,38,0.3)",
+                    color: "var(--color-danger)", fontSize: 11, fontWeight: 600,
+                }}>
+                    {pickerHint}
+                </div>
+            )}
+            {!collapsed && <div style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))",
+                gap: 10,
+            }}>
+                {Array.from({ length: pageCount }, (_, i) => {
+                    const page = i + 1;
+                    const isSelected = selectedPages.includes(page);
+                    const src = previews[i];
+                    return (
+                        <button
+                            key={page}
+                            onClick={() => onToggle(page)}
+                            title={t("ocr.pagePicker.pageLabel", { n: page })}
+                            style={{
+                                position: "relative",
+                                padding: 0,
+                                background: "var(--color-bg-elevated)",
+                                border: `2px solid ${isSelected ? "#6366f1" : "var(--color-border)"}`,
+                                borderRadius: 8,
+                                cursor: "pointer",
+                                overflow: "hidden",
+                                display: "flex", flexDirection: "column",
+                                alignItems: "stretch",
+                                boxShadow: isSelected ? "0 0 0 3px rgba(99,102,241,0.25)" : "none",
+                                transition: "border-color 0.15s, box-shadow 0.15s, transform 0.1s",
+                            }}
+                        >
+                            {src ? (
+                                <img
+                                    src={src}
+                                    alt={t("ocr.pagePicker.pageLabel", { n: page })}
+                                    draggable={false}
+                                    style={{
+                                        width: "100%", height: "auto",
+                                        display: "block",
+                                        background: "#ffffff",
+                                        // Landscape/portrait render at their true aspect thanks
+                                        // to OCR-6c — do not force a fixed height here.
+                                    }}
+                                />
+                            ) : (
+                                <div style={{
+                                    aspectRatio: "210 / 297",
+                                    display: "flex", alignItems: "center", justifyContent: "center",
+                                    color: "var(--color-text-4)", fontSize: 11,
+                                }}>—</div>
+                            )}
+                            <div style={{
+                                padding: "5px 8px",
+                                fontSize: 10.5, fontWeight: 700,
+                                color: isSelected ? "#6366f1" : "var(--color-text-3)",
+                                textAlign: "center",
+                                borderTop: "1px solid var(--color-border)",
+                                background: "var(--color-bg-panel)",
+                            }}>
+                                {t("ocr.pagePicker.pageLabel", { n: page })}
+                            </div>
+                            {isSelected && (
+                                <span style={{
+                                    position: "absolute", top: 6, right: 6,
+                                    width: 20, height: 20, borderRadius: "50%",
+                                    background: "#6366f1", color: "#fff",
+                                    display: "inline-flex", alignItems: "center", justifyContent: "center",
+                                    boxShadow: "0 2px 4px rgba(0,0,0,0.3)",
+                                    fontSize: 12, fontWeight: 700,
+                                }}>
+                                    <Icon.Check width={12} height={12} />
+                                </span>
+                            )}
+                        </button>
+                    );
+                })}
+            </div>}
+        </div>
+    );
 }
 
 // ─── Batch panel ─────────────────────────────────────────────────────────────
@@ -1837,6 +2794,75 @@ function BatchPanel({ items, running, onRun, onDownload, onRemove, onAddMore, on
 
             {/* File list */}
             <div className="custom-scrollbar" style={{ flex: 1, overflowY: "auto", padding: 10 }}>
+                {/* Inline results table — union of scalar fields across every
+                    "done" item, one row per file. Mirrors what the Excel export
+                    Summary sheet shows, so users can inspect without exporting. */}
+                {hasResults && (() => {
+                    const fieldKeys: string[] = [];
+                    const seen = new Set<string>();
+                    for (const it of items) {
+                        if (it.status !== "done" || !it.data) continue;
+                        for (const [k, v] of Object.entries(it.data)) {
+                            if (seen.has(k)) continue;
+                            const val = (v && typeof v === "object" && "value" in v) ? (v as any).value : v;
+                            // Skip table-type values — they'd blow up the row height.
+                            if (Array.isArray(val) && val.length > 0 && typeof val[0] === "object") continue;
+                            seen.add(k);
+                            fieldKeys.push(k);
+                        }
+                    }
+                    const fmt = (v: any): string => {
+                        if (v == null) return "";
+                        const inner = (v && typeof v === "object" && "value" in v) ? v.value : v;
+                        if (inner == null) return "";
+                        if (Array.isArray(inner)) return `[${inner.length} rows]`;
+                        return String(inner);
+                    };
+                    if (fieldKeys.length === 0) return null;
+                    return (
+                        <div style={{
+                            marginBottom: 12,
+                            border: "1px solid var(--color-border)",
+                            borderRadius: 8, overflow: "hidden",
+                        }}>
+                            <div style={{
+                                padding: "6px 10px", fontSize: 10.5, fontWeight: 700,
+                                letterSpacing: 0.8, textTransform: "uppercase",
+                                color: "var(--color-text-3)",
+                                background: "var(--color-bg-surface)",
+                                borderBottom: "1px solid var(--color-border)",
+                            }}>
+                                {t("ocr.batchResultsTitle")} · {counts.done}/{counts.total}
+                            </div>
+                            <div style={{ overflowX: "auto" }}>
+                                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
+                                    <thead>
+                                        <tr style={{ background: "var(--color-bg-elevated)" }}>
+                                            <th style={{ padding: "6px 10px", textAlign: "left", color: "var(--color-text-3)", fontSize: 10, textTransform: "uppercase", fontWeight: 600, position: "sticky", left: 0, background: "var(--color-bg-elevated)", zIndex: 1 }}>{t("ocr.batchResultsFile")}</th>
+                                            {fieldKeys.map(k => (
+                                                <th key={k} style={{ padding: "6px 10px", textAlign: "left", color: "var(--color-text-3)", fontSize: 10, textTransform: "uppercase", fontWeight: 600, whiteSpace: "nowrap" }}>{k}</th>
+                                            ))}
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {items.filter(it => it.status === "done" && it.data).map(it => (
+                                            <tr key={it.id} style={{ borderTop: "1px solid var(--color-border)" }}>
+                                                <td style={{ padding: "6px 10px", color: "var(--color-text-1)", fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 180, position: "sticky", left: 0, background: "var(--color-bg-panel)", zIndex: 1 }} title={it.file.name}>
+                                                    {it.file.name}
+                                                </td>
+                                                {fieldKeys.map(k => (
+                                                    <td key={k} style={{ padding: "6px 10px", color: "var(--color-text-2)", verticalAlign: "top", maxWidth: 260, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                                                        {fmt(it.data?.[k])}
+                                                    </td>
+                                                ))}
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    );
+                })()}
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                     {items.map(it => {
                         const st = STATUS_STYLE[it.status];

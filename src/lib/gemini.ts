@@ -11,7 +11,7 @@ export async function generateWithRotation(
 
     for (const key of apiKeys) {
         try {
-            console.log(`--- Attempting OCR with key: ${key.substring(0, 8)}... ---`);
+            console.log(`--- Attempting OCR with key: ${"AIza****"}... ---`);
             const genAI = new GoogleGenerativeAI(key);
             const model = genAI.getGenerativeModel({ model: modelName });
 
@@ -25,7 +25,7 @@ export async function generateWithRotation(
             const response = await result.response;
             return response.text();
         } catch (error: any) {
-            console.warn(`Key ${key.substring(0, 8)} failed:`, error.message);
+            console.warn(`Key ${"AIza****"} failed:`, error.message);
             lastError = error;
 
             // ถ้าเป็น Rate Limit หรือ Error ที่ควรเปลี่ยน Key ให้วนลูปต่อ

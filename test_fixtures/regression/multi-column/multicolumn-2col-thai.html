@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8" />
+<title>OCR-2 fixture: multi-column/multicolumn-2col-thai</title>
+<style>
+  body { font-family: "Sarabun", "Noto Sans Thai", "TH Sarabun New", sans-serif; color: #000; margin: 0; padding: 32px; font-size: 15pt; }
+  h1 { font-size: 20pt; margin: 0 0 16px 0; text-align: center; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 0; border: 1px solid #000; }
+  .cell { border: 1px solid #000; padding: 10px 14px; }
+  .label { font-weight: bold; background: #f2f2f2; }
+</style>
+</head>
+<body>
+  <h1>แบบฟอร์มโอนย้าย 2 คอลัมน์</h1>
+  <div class="cols">
+    <div class="cell label">ผู้ส่ง</div>
+    <div class="cell label">ผู้รับ</div>
+    <div class="cell">คลังกลาง กรุงเทพ</div>
+    <div class="cell">คลังภาค 5 จ.เชียงใหม่</div>
+  </div>
+  <p style="font-size:12pt; margin-top:14px;">Thai columnar disambiguation — labels คล้ายกัน (ผู้ส่ง/ผู้รับ) values คล้ายกัน (คลัง...จังหวัด...); ต้องเลือกค่าใต้ label เป้าหมายให้ถูก. Guards OCR-2 issue 1.4 pattern on Thai text.</p>
+</body>
+</html>

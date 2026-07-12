@@ -9,7 +9,17 @@ interface TierConfigData {
     features: FeatureMeta[];
     credits: Record<string, number>;
     flags: Record<string, Record<string, boolean>>;
+    /** BILL-1: currently active OCR credit model (per_page / field_formula / per_file). */
+    credit_model: string;
+    /** BILL-1: valid options the admin can flip to. */
+    credit_models: string[];
 }
+
+const CREDIT_MODEL_LABEL: Record<string, string> = {
+    per_page: "Per page (1 หน้า = 1 credit) — default",
+    field_formula: "Field formula (legacy multiplicative)",
+    per_file: "Per file (1 credit / ไฟล์)",
+};
 
 const TIER_LABEL: Record<string, string> = {
     free: "Free", starter: "Starter", pro: "Pro", enterprise: "Enterprise",
@@ -26,6 +36,7 @@ export default function AdminTierControlView({ userId }: { userId: string }) {
     // editable drafts
     const [flags, setFlags] = useState<Record<string, Record<string, boolean>>>({});
     const [credits, setCredits] = useState<Record<string, string>>({});
+    const [creditModel, setCreditModel] = useState<string>("per_page");
 
     const fetchData = useCallback(async () => {
         setLoading(true);
@@ -37,6 +48,8 @@ export default function AdminTierControlView({ userId }: { userId: string }) {
             const d: TierConfigData = {
                 tiers: json.tiers || [], features: json.features || [],
                 credits: json.credits || {}, flags: json.flags || {},
+                credit_model: json.credit_model || "per_page",
+                credit_models: json.credit_models || ["per_page", "field_formula", "per_file"],
             };
             setData(d);
             // Build explicit boolean drafts — unset flag defaults to ON.
@@ -51,6 +64,7 @@ export default function AdminTierControlView({ userId }: { userId: string }) {
             }
             setFlags(fDraft);
             setCredits(cDraft);
+            setCreditModel(d.credit_model);
         } catch (err: any) {
             setError(apiError(err?.code || ErrorCode.GENERIC, err?.vars, t));
         } finally {
@@ -70,7 +84,7 @@ export default function AdminTierControlView({ userId }: { userId: string }) {
             const res = await fetch(`/api/admin/tier-config?userId=${userId}`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ flags, credits: creditsNum }),
+                body: JSON.stringify({ flags, credits: creditsNum, credit_model: creditModel }),
             });
             const json = await res.json() as any;
             if (!json.success) throw new Error(json.error || "Save failed");
@@ -118,6 +132,25 @@ export default function AdminTierControlView({ userId }: { userId: string }) {
                 {error && (
                     <div className="p-4 bg-rose-50 text-rose-600 border border-rose-200 rounded-xl text-sm font-bold">{error}</div>
                 )}
+
+                {/* BILL-1: OCR credit model selector — no redeploy, immediate effect on next run */}
+                <div>
+                    <h3 className="text-sm font-black uppercase tracking-widest text-slate-400 mb-3">OCR credit model</h3>
+                    <div className="border border-slate-200 dark:border-slate-800 rounded-2xl p-5 bg-slate-50 dark:bg-slate-800/50">
+                        <select
+                            value={creditModel}
+                            onChange={(e) => setCreditModel(e.target.value)}
+                            className="w-full md:w-auto px-4 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-bold"
+                        >
+                            {(data?.credit_models || ["per_page", "field_formula", "per_file"]).map(m => (
+                                <option key={m} value={m}>{CREDIT_MODEL_LABEL[m] || m}</option>
+                            ))}
+                        </select>
+                        <p className="text-[11px] text-slate-400 mt-2">
+                            สลับได้ทันทีโดยไม่ต้อง redeploy · Compare ยังใช้สูตร field-formula เดิม (BILL-1 ครอบคลุมเฉพาะ OCR)
+                        </p>
+                    </div>
+                </div>
 
                 {/* Feature toggle matrix */}
                 <div>

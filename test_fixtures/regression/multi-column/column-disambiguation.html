@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>OCR-2 fixture: column-disambiguation</title>
+<style>
+  body { font-family: "Times New Roman", serif; color: #000; margin: 0; padding: 40px; }
+  h1 { font-size: 22pt; margin: 0 0 24px 0; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0; border: 1px solid #000; font-size: 18pt; }
+  .cell { padding: 14px 18px; border: 1px solid #000; }
+  .label { font-weight: bold; background: #f2f2f2; }
+</style>
+</head>
+<body>
+  <h1>Transfer Slip</h1>
+  <div class="grid">
+    <div class="cell label">Sender</div>
+    <div class="cell label">Receiver</div>
+    <div class="cell">Warehouse A</div>
+    <div class="cell">Warehouse B</div>
+  </div>
+  <p style="margin-top:24px; font-size:14pt;">Note: labels are semantically close ("Sender" / "Receiver") and values are semantically close ("Warehouse A" / "Warehouse B"), so a bag-of-words fallback will often swap them. Test PASSES only when the model returns the value directly under the target label.</p>
+</body>
+</html>

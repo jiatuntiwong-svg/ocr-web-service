@@ -1,0 +1,243 @@
+{
+  "suite": "OCR-2-benchmark",
+  "version": "1.0.0",
+  "description": "S2-1 — Benchmark-style OCR regression suite. 5 categories × ≥ 2 cases per KB §3 (Thai form, dense, landscape, tables, multi-column). Each case declares its category, guard link (issue/report), and pass criterion. Scoring: per-case, per-category, overall. All fixtures generated deterministically from HTML via generate-fixtures.mjs.",
+  "defaults": {
+    "templateName": "${OCR_E2E_REGRESSION_TEMPLATE}",
+    "runs": 10,
+    "min_pass_rate": 0.8
+  },
+  "categories": {
+    "thai-form": {
+      "label": "Thai form",
+      "description": "Dense Thai form-like documents. Regression class from OCR-1/2/6 (multi-line join, prefix retention, content-density on real forms)."
+    },
+    "dense": {
+      "label": "Dense / high-density",
+      "description": "High content density where attention dilution drops or blends multi-line values. Guards OCR-6 (crop-based extraction) and OCR-6b (sibling-label blend)."
+    },
+    "landscape": {
+      "label": "Landscape",
+      "description": "A4 landscape pages where letterbox coordinate remap can drift the bbox_hint crop off target. Guards OCR-6c."
+    },
+    "tables": {
+      "label": "Tables",
+      "description": "Structured row/col tables. Exercises the `type === \"table\"` credit branch and structural extraction fidelity."
+    },
+    "multi-column": {
+      "label": "Multi-column",
+      "description": "Columnar disambiguation — two adjacent labels with semantically similar siblings. Model must return the target column's value. Also covers verbatim + corrections_report in 2-col layouts (OCR-2 issue 1.1/1.4)."
+    }
+  },
+  "cases": [
+    {
+      "id": "multiline-join",
+      "category": "thai-form",
+      "fixture": "test_fixtures/regression/thai-form/generated/multiline-join.pdf",
+      "template": "${OCR_E2E_REGRESSION_TEMPLATE}",
+      "field": "ผู้รับโอน",
+      "assertion": "multiline",
+      "expected": {
+        "lines": [
+          "คลังภาคบริการโลหิตแห่งชาติที่ 3 จ.ชลบุรี",
+          "วัตถุดิบและงานระหว่างทำ"
+        ]
+      },
+      "min_pass_rate": 0.8,
+      "guards_issue": "docs/OCR_TESTING_LOG.md#21-multi-line-value-ถูกตัดเหลือบรรทัดเดียว"
+    },
+    {
+      "id": "prefix-retention",
+      "category": "thai-form",
+      "fixture": "test_fixtures/regression/thai-form/generated/prefix-retention.pdf",
+      "template": "${OCR_E2E_REGRESSION_TEMPLATE}",
+      "field": "หน่วยงาน",
+      "assertion": "prefix",
+      "expected": {
+        "expected": "คลังภาคบริการโลหิตแห่งชาติที่ 7 จ.อุบลราชธานี",
+        "prefix": "คลัง"
+      },
+      "min_pass_rate": 0.8,
+      "guards_issue": "docs/OCR_TESTING_LOG.md#22-prefix-dropping"
+    },
+    {
+      "id": "thai-dense-multiline-repro",
+      "category": "thai-form",
+      "fixture": "test_fixtures/regression/thai-form/generated/dense-multiline-repro.pdf",
+      "template": "${OCR_E2E_REGRESSION_TEMPLATE}",
+      "field": "ผู้รับโอน",
+      "assertion": "multiline",
+      "expected": {
+        "lines": [
+          "คลังภาคบริการโลหิตแห่งชาติที่ 3 จ.ชลบุรี",
+          "วัตถุดิบและงานระหว่างทำ"
+        ]
+      },
+      "min_pass_rate": 0.7,
+      "guards_issue": "pm/reports/OCR-2.md#case-6--real-page1-multiline",
+      "notes": "P0 reproduction of the doc1 deterministic content-density failure (22 dense rows below multiline header). Pre-OCR-6 baseline was 0/3. Post-OCR-6 crop-pass should recover."
+    },
+    {
+      "id": "dense-22-row-table",
+      "category": "dense",
+      "fixture": "test_fixtures/regression/dense/generated/dense-22-row-table.pdf",
+      "template": "${OCR_E2E_DENSE_TEMPLATE}",
+      "field": "ผู้จัดทำ",
+      "assertion": "verbatim",
+      "expected": { "expected": "สมชาย รักษาการ" },
+      "min_pass_rate": 0.7,
+      "guards_issue": "pm/reports/OCR-6.md",
+      "notes": "22-row inventory table. Regression class: header field survives content dilution when 22 dense rows dominate the page."
+    },
+    {
+      "id": "dense-sibling-blend",
+      "category": "dense",
+      "fixture": "test_fixtures/regression/dense/generated/dense-sibling-blend.pdf",
+      "template": "${OCR_E2E_DENSE_TEMPLATE}",
+      "field": "ศูนย์ผู้รับ",
+      "assertion": "multiline",
+      "expected": {
+        "lines": [
+          "ศูนย์รับบริจาคโลหิตและพลาสมา",
+          "สาขาที่ 11"
+        ],
+        "mustNotContain": ["ศูนย์บริการโลหิตแห่งชาติ"]
+      },
+      "min_pass_rate": 0.7,
+      "guards_issue": "pm/reports/OCR-6b.md",
+      "notes": "Sibling column has semantically-close value (ศูนย์บริการโลหิตแห่งชาติ). OCR-6b prompt rules must prevent blend."
+    },
+    {
+      "id": "landscape-sibling-labels",
+      "category": "landscape",
+      "fixture": "test_fixtures/regression/landscape/landscape-sibling-labels/source.pdf",
+      "template": "${OCR_E2E_LANDSCAPE_TEMPLATE}",
+      "field": "ชื่อและรหัสศูนย์รับผิดชอบ",
+      "assertion": "multiline",
+      "expected": {
+        "lines": [
+          "3 6",
+          "ศูนย์รับบริจาคโลหิตและพลาสมา",
+          "สถานีกาชาดที่11 วิเศษนิยม บางแค"
+        ],
+        "mustNotContain": ["ศูนย์บริการโลหิตและพลาสมา", "ศูนย์บริการโลหิตแห่งชาติ"],
+        "provenanceExpected": "crop"
+      },
+      "min_pass_rate": 0.8,
+      "guards_issue": "pm/reports/OCR-6b.md",
+      "skip_if_missing": true,
+      "notes": "Real fixture (uncommitted per PII decision). Skip when file absent. Assert value + provenance=crop."
+    },
+    {
+      "id": "landscape-a4-widefield",
+      "category": "landscape",
+      "fixture": "test_fixtures/regression/landscape/generated/landscape-a4-widefield.pdf",
+      "template": "${OCR_E2E_LANDSCAPE_TEMPLATE}",
+      "field": "ชื่อและรหัสศูนย์รับผิดชอบ",
+      "assertion": "multiline",
+      "expected": {
+        "lines": [
+          "3 6",
+          "ศูนย์รับบริจาคโลหิตและพลาสมา",
+          "สถานีกาชาดที่11 วิเศษนิยม บางแค"
+        ]
+      },
+      "min_pass_rate": 0.8,
+      "guards_issue": "pm/reports/OCR-6c.md",
+      "notes": "Synthetic landscape mirror of the real fixture. Guards OCR-6c letterbox coordinate drift on committed fixture."
+    },
+    {
+      "id": "tables-3col-inventory",
+      "category": "tables",
+      "fixture": "test_fixtures/regression/tables/generated/tables-3col-inventory.pdf",
+      "template": "${OCR_E2E_TABLE_TEMPLATE}",
+      "field": "InventoryTable",
+      "assertion": "table_structure",
+      "expected": {
+        "rows": [
+          ["Widget", "100", "12.50"],
+          ["Gadget", "45", "33.00"],
+          ["Sprocket", "220", "4.75"],
+          ["Bolt", "1000", "0.20"]
+        ]
+      },
+      "min_pass_rate": 0.7,
+      "guards_issue": "docs/BEHAVIOR_REFERENCE.md — table credit branch",
+      "notes": "Requires template field of type `table`. Assertion checks row-by-row match, allowing whitespace variance."
+    },
+    {
+      "id": "tables-rowheader-summary",
+      "category": "tables",
+      "fixture": "test_fixtures/regression/tables/generated/tables-rowheader-summary.pdf",
+      "template": "${OCR_E2E_TABLE_TEMPLATE}",
+      "field": "SummaryTable",
+      "assertion": "table_structure",
+      "expected": {
+        "rows": [
+          ["Total Revenue", "1,250,000"],
+          ["Total Cost", "780,000"],
+          ["Gross Margin", "470,000"],
+          ["Units Sold", "3,400"],
+          ["Refunds", "25,000"]
+        ]
+      },
+      "min_pass_rate": 0.7,
+      "guards_issue": "docs/BEHAVIOR_REFERENCE.md — table credit branch",
+      "notes": "Row-header table (2-col: label→value)."
+    },
+    {
+      "id": "column-disambiguation",
+      "category": "multi-column",
+      "fixture": "test_fixtures/regression/multi-column/generated/column-disambiguation.pdf",
+      "template": "${OCR_E2E_REGRESSION_TEMPLATE}",
+      "field": "Receiver",
+      "assertion": "disambiguation",
+      "expected": { "expected": "Warehouse B", "sibling": "Warehouse A" },
+      "min_pass_rate": 0.8,
+      "guards_issue": "docs/OCR_TESTING_LOG.md#14-ai-ตีความคำใกล้เคียง"
+    },
+    {
+      "id": "multicolumn-2col-thai",
+      "category": "multi-column",
+      "fixture": "test_fixtures/regression/multi-column/generated/multicolumn-2col-thai.pdf",
+      "template": "${OCR_E2E_REGRESSION_TEMPLATE}",
+      "field": "ผู้รับ",
+      "assertion": "disambiguation",
+      "expected": {
+        "expected": "คลังภาค 5 จ.เชียงใหม่",
+        "sibling": "คลังกลาง กรุงเทพ"
+      },
+      "min_pass_rate": 0.8,
+      "guards_issue": "docs/OCR_TESTING_LOG.md#14-ai-ตีความคำใกล้เคียง",
+      "notes": "Thai-language mirror of column-disambiguation. Same regression class on Thai text."
+    },
+    {
+      "id": "verbatim-plastelet",
+      "category": "multi-column",
+      "fixture": "test_fixtures/regression/multi-column/generated/verbatim-plastelet.pdf",
+      "template": "${OCR_E2E_REGRESSION_TEMPLATE}",
+      "field": "Product",
+      "assertion": "verbatim",
+      "expected": { "expected": "Plastelet" },
+      "min_pass_rate": 0.8,
+      "guards_issue": "docs/OCR_TESTING_LOG.md#11-ai-แกตัดคำเอง"
+    },
+    {
+      "id": "corrections-recieve",
+      "category": "multi-column",
+      "fixture": "test_fixtures/regression/multi-column/generated/corrections-recieve.pdf",
+      "template": "${OCR_E2E_REGRESSION_TEMPLATE}",
+      "field": "Action",
+      "assertion": "corrections_report",
+      "expected": { "original": "recieve", "corrected": "receive" },
+      "min_pass_rate": 0.8,
+      "guards_issue": "docs/OCR_TESTING_LOG.md#11-ai-แกตัดคำเอง"
+    }
+  ],
+  "notes": {
+    "runner_backcompat": "Legacy configs `ocr-2.json` and `ocr-6b.json` still work — run.mjs auto-detects legacy shape (top-level `cases[].assertion` + `.expect`) vs benchmark shape (top-level `categories` + `cases[].category` + `.expected`).",
+    "table_credit_branch": "Table cases require a template with fields of type `table`. If OCR_E2E_TABLE_TEMPLATE is unset the runner will skip the entire `tables` category (not fail).",
+    "template_hint_policy": "column-disambiguation and multicolumn-2col-thai MUST run on a template with NO bbox_hint on the target field, or the test is meaningless.",
+    "landscape_fixture": "landscape-sibling-labels uses a real (uncommitted) source PDF. Case is auto-skipped when the file is absent (skip_if_missing: true)."
+  }
+}

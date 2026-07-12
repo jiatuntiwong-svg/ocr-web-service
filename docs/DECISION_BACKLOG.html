@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DOCRoom — Decision Backlog (2026-06-18)</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --panel: #1e293b;
+    --card: #273548;
+    --text: #e2e8f0;
+    --text-dim: #94a3b8;
+    --text-soft: #64748b;
+    --border: #334155;
+    --accent: #06b6d4;
+    --urgent: #ef4444;
+    --important: #f59e0b;
+    --strategic: #10b981;
+    --tbd: #8b5cf6;
+    --done: #22c55e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 24px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans Thai", sans-serif;
+    background: var(--bg); color: var(--text);
+    line-height: 1.6;
+  }
+  .container { max-width: 1200px; margin: 0 auto; }
+  header {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 24px; margin-bottom: 32px;
+  }
+  h1 { margin: 0 0 8px; font-size: 28px; letter-spacing: -0.5px; }
+  h1 .accent { color: var(--accent); }
+  .meta { color: var(--text-dim); font-size: 14px; }
+  .meta b { color: var(--text); }
+
+  .stats {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px; margin: 24px 0 8px;
+  }
+  .stat {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px;
+  }
+  .stat .num { font-size: 28px; font-weight: 700; letter-spacing: -0.5px; }
+  .stat .label { color: var(--text-dim); font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
+  .stat.urgent .num { color: var(--urgent); }
+  .stat.important .num { color: var(--important); }
+  .stat.strategic .num { color: var(--strategic); }
+  .stat.tbd .num { color: var(--tbd); }
+
+  section { margin-bottom: 40px; }
+  .section-title {
+    display: flex; align-items: center; gap: 12px;
+    font-size: 20px; margin: 0 0 16px;
+  }
+  .badge {
+    display: inline-block; padding: 4px 10px; border-radius: 6px;
+    font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+  .badge.urgent { background: rgba(239,68,68,0.15); color: var(--urgent); }
+  .badge.important { background: rgba(245,158,11,0.15); color: var(--important); }
+  .badge.strategic { background: rgba(16,185,129,0.15); color: var(--strategic); }
+  .badge.tbd { background: rgba(139,92,246,0.15); color: var(--tbd); }
+  .badge.done { background: rgba(34,197,94,0.15); color: var(--done); }
+
+  .group {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px; margin-bottom: 16px;
+  }
+  .group h3 {
+    margin: 0 0 14px; font-size: 16px;
+    color: var(--accent); display: flex; align-items: center; gap: 10px;
+  }
+  .group h3 .icon {
+    width: 28px; height: 28px; border-radius: 6px;
+    background: rgba(6,182,212,0.15); color: var(--accent);
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 700;
+  }
+
+  table {
+    width: 100%; border-collapse: collapse; font-size: 13.5px;
+  }
+  th {
+    text-align: left; padding: 8px 10px;
+    color: var(--text-soft); font-weight: 600; font-size: 11px;
+    text-transform: uppercase; letter-spacing: 1px;
+    border-bottom: 1px solid var(--border);
+  }
+  td {
+    padding: 10px; vertical-align: top;
+    border-bottom: 1px solid rgba(51,65,85,0.5);
+  }
+  td.id {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-weight: 700; color: var(--accent);
+    width: 60px;
+  }
+  td.title { font-weight: 600; width: 28%; }
+  td.note { color: var(--text-dim); font-size: 12.5px; }
+  td.status { width: 110px; text-align: center; }
+  td.check { width: 50px; text-align: center; }
+  td.check input { width: 16px; height: 16px; cursor: pointer; }
+
+  .status-pill {
+    display: inline-block; padding: 3px 9px; border-radius: 5px;
+    font-size: 11px; font-weight: 600;
+  }
+  .status-pill.unknown { background: rgba(148,163,184,0.15); color: var(--text-dim); }
+  .status-pill.notyet { background: rgba(245,158,11,0.15); color: var(--important); }
+  .status-pill.notsafe { background: rgba(239,68,68,0.15); color: var(--urgent); }
+  .status-pill.deployed { background: rgba(34,197,94,0.15); color: var(--done); }
+  .status-pill.tbd { background: rgba(139,92,246,0.15); color: var(--tbd); }
+
+  .priority-banner {
+    background: linear-gradient(135deg, rgba(239,68,68,0.1), rgba(245,158,11,0.05));
+    border: 1px solid rgba(239,68,68,0.3); border-radius: 12px;
+    padding: 16px 20px; margin-bottom: 28px;
+  }
+  .priority-banner h2 { margin: 0 0 6px; font-size: 16px; color: var(--urgent); }
+  .priority-banner p { margin: 0; color: var(--text); font-size: 13.5px; }
+
+  .order-list {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px;
+  }
+  .order-list ol {
+    margin: 0; padding-left: 22px;
+  }
+  .order-list li {
+    margin-bottom: 10px;
+    padding-left: 6px;
+  }
+  .order-list li strong { color: var(--accent); }
+
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 12px;
+    margin: 12px 0 24px; font-size: 12px;
+  }
+  .legend-item { display: flex; align-items: center; gap: 6px; color: var(--text-dim); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .dot.u { background: var(--urgent); }
+  .dot.i { background: var(--important); }
+  .dot.s { background: var(--strategic); }
+  .dot.t { background: var(--tbd); }
+  .dot.d { background: var(--done); }
+
+  footer {
+    text-align: center; padding: 32px 0 16px;
+    color: var(--text-soft); font-size: 12px;
+    border-top: 1px solid var(--border); margin-top: 40px;
+  }
+  footer a { color: var(--accent); text-decoration: none; }
+
+  @media print {
+    body { background: white; color: black; padding: 12px; }
+    .container { max-width: 100%; }
+    .group, .stat, .order-list, .priority-banner { break-inside: avoid; }
+    .badge, .status-pill { border: 1px solid #ccc; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>DOCRoom — <span class="accent">Decision Backlog</span></h1>
+  <p class="meta">
+    บันทึก: <b>2026-06-18</b> &nbsp;·&nbsp; รวมทุกประเด็นที่ค้างตัดสินใจของ DOCRoom — สำหรับคุยกับทีม<br>
+    Project: ocr-web-service &nbsp;·&nbsp; Deploy: <code>cb74f12</code>
+  </p>
+
+  <div class="stats">
+    <div class="stat urgent"><div class="num">11</div><div class="label">🔥 Urgent</div></div>
+    <div class="stat important"><div class="num">15</div><div class="label">🟡 Important</div></div>
+    <div class="stat strategic"><div class="num">12</div><div class="label">🟢 Strategic</div></div>
+    <div class="stat tbd"><div class="num">6</div><div class="label">🧱 OCR/Compare TBD</div></div>
+    <div class="stat tbd"><div class="num">10</div><div class="label">📝 PDF Edit Open</div></div>
+  </div>
+
+  <div class="legend">
+    <span class="legend-item"><span class="dot u"></span> Urgent — ทำเดือนนี้</span>
+    <span class="legend-item"><span class="dot i"></span> Important — 1-2 เดือน</span>
+    <span class="legend-item"><span class="dot s"></span> Strategic — ตามแผน</span>
+    <span class="legend-item"><span class="dot t"></span> TBD — รอตัดสินก่อนลุย</span>
+    <span class="legend-item"><span class="dot d"></span> Done — เสร็จแล้ว</span>
+  </div>
+</header>
+
+<div class="priority-banner">
+  <h2>⚡ Top 4 ที่ต้องคุยก่อน</h2>
+  <p>
+    <b>1.</b> PDPA / Privacy posture (A1-A4) &nbsp;·&nbsp;
+    <b>2.</b> Public API exposure (A7) &nbsp;·&nbsp;
+    <b>3.</b> Rate limit ต่อ user (B1) &nbsp;·&nbsp;
+    <b>4.</b> Cleanup secret + npm vulns (A5-A6)
+  </p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2 class="section-title">🔥 <span>Urgent — ที่กำลังรันอยู่ ควรตัดสินก่อนเกิดปัญหา</span> <span class="badge urgent">Now</span></h2>
+
+  <div class="group">
+    <h3><span class="icon">A</span> ความปลอดภัย / Compliance</h3>
+    <table>
+      <thead>
+        <tr><th>ID</th><th>ประเด็น</th><th>สถานะ</th><th>หมายเหตุ</th><th>คุย</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="id">A1</td>
+          <td class="title">PDPA compliance</td>
+          <td class="status"><span class="status-pill unknown">ไม่ทราบ</span></td>
+          <td class="note">OCR ใบกำกับ/เอกสารราชการ = personal data; ละเลย = ปรับสูงตาม พ.ร.บ.</td>
+          <td class="check"><input type="checkbox"></td>
+        </tr>
+        <tr>
+          <td class="id">A2</td>
+          <td class="title">Privacy Policy + ToS</td>
+          <td class="status"><span class="status-pill unknown">ไม่ทราบ</span></td>
+          <td class="note">ผู้ใช้ต้องเซ็นยินยอม โดยเฉพาะหลังเปลี่ยน "เก็บไฟล์ใน R2" (Compare rework)</td>
+          <td class="check"><input type="checkbox"></td>
+        </tr>
+        <tr>
+          <td class="id">A3</td>
+          <td class="title">Data residency</td>
+          <td class="status"><span class="status-pill unknown">ไม่ทราบ</span></td>
+          <td class="note">R2 + D1 อาจอยู่นอกไทย — ลูกค้าองค์กรไทย/รัฐถามแน่</td>
+          <td class="check"><input type="checkbox"></td>
+        </tr>
+        <tr>
+          <td class="id">A4</td>
+          <td class="title">Sensitive data masking</td>
+          <td class="status"><span class="status-pill notyet">ไม่มี</span></td>
+          <td class="note">เลขบัตรปชช., เลขบัญชี — AI extract แล้วเก็บใน D1 plain; หลุด = เสียหายหนัก</td>
+          <td class="check"><input type="checkbox"></td>
+        </tr>
+        <tr>
+          <td class="id">A5</td>
+          <td class="title">npm audit (20 vulns)</td>
+          <td class="status"><span class="status-pill notyet">ค้าง</span></td>
+          <td class="note">จาก SECURITY_AUDIT #4 — งานเล็ก</td>
+          <td class="check"><input type="checkbox"></td>
+        </tr>
+        <tr>
+          <td class="id">A6</td>
+          <td class="title">ลบ Cloudflare secret ส่วนเกิน</td>
+          <td class="status"><span class="status-pill notyet">ค้าง</span></td>
+          <td class="note"><code>_</code> และ <code>session_secret</code> (lowercase) จาก Phase 0 setup — งานเล็ก</td>
+          <td class="check"><input type="checkbox"></td>
+        </tr>
+        <tr>
+          <td class="id">A7</td>
+          <td class="title">Public API <code>/api/v1/extract</code></td>
+          <td class="status"><span class="status-pill notsafe">unsafe</span></td>
+          <td class="note">MIGRATION.md §9 — email+password per request, charge ก่อน OCR, race-unsafe; เปิดอยู่ไหม?</td>
+          <td class="check"><input type="checkbox"></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="group">
+    <h3><span class="icon">B</span> Operations / Cost</h3>
+    <table>
+      <thead><tr><th>ID</th><th>ประเด็น</th><th>สถานะ</th><th>หมายเหตุ</th><th>คุย</th></tr></thead>
+      <tbody>
+        <tr><td class="id">B1</td><td class="title">Rate limit ต่อ user</td><td class="status"><span class="status-pill unknown">ไม่ทราบ</span></td><td class="note">Gemini ราคาแพง user คนเดียวยิงเร็วๆ = bill พุ่ง</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">B2</td><td class="title">Cost alert (Gemini / Stripe)</td><td class="status"><span class="status-pill unknown">ไม่ทราบ</span></td><td class="note">มี admin AI usage dashboard แต่ alert threshold?</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">B3</td><td class="title">Error monitoring</td><td class="status"><span class="status-pill unknown">ไม่ทราบ</span></td><td class="note">มีแค่ logSystemEvent ใน DB? Sentry / external aggregation?</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">B4</td><td class="title">D1 + R2 backup policy</td><td class="status"><span class="status-pill unknown">ไม่ทราบ</span></td><td class="note">Cloudflare auto-snapshot? Restore plan?</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">B5</td><td class="title">Secret rotation policy</td><td class="status"><span class="status-pill unknown">ไม่ทราบ</span></td><td class="note">Gemini/Stripe key หลุด = ทำยังไง?</td><td class="check"><input type="checkbox"></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2 class="section-title">🟡 <span>UX/ฟีเจอร์ในระบบที่ยังไม่จบ policy</span> <span class="badge important">Important</span></h2>
+
+  <div class="group">
+    <h3><span class="icon">C</span> Current System Gaps</h3>
+    <table>
+      <thead><tr><th>ID</th><th>ประเด็น</th><th>สถานะ</th><th>หมายเหตุ</th><th>คุย</th></tr></thead>
+      <tbody>
+        <tr><td class="id">C1</td><td class="title">Notification — policy</td><td class="status"><span class="status-pill deployed">มี</span></td><td class="note">channel = in-app only? expire เมื่อไหร่? user clear ได้ไหม?</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">C2</td><td class="title">Confidence threshold default</td><td class="status"><span class="status-pill deployed">deployed</span></td><td class="note">G3 deploy แล้ว default 0.7; feedback จาก user จริงยัง?</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">C3</td><td class="title">Stripe failed payment</td><td class="status"><span class="status-pill unknown">ไม่ทราบ</span></td><td class="note">Retry? Block? Grace period?</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">C4</td><td class="title">Mobile responsive</td><td class="status"><span class="status-pill notyet">ไม่ test</span></td><td class="note">viewport setting มี แต่ไม่ได้ทดสอบจริง</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">C5</td><td class="title">DOCX→PNG browser support</td><td class="status"><span class="status-pill notyet">ไม่ test</span></td><td class="note">html2canvas — Safari, Edge, Firefox?</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">C6</td><td class="title">AI prompt: TH/EN mixed-lang</td><td class="status"><span class="status-pill unknown">ไม่ทราบ</span></td><td class="note">รองรับเอกสาร TH/EN ทั้งคู่? เอกสารปนภาษา?</td><td class="check"><input type="checkbox"></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2 class="section-title">🟡 <span>Feature ที่ตัดสินใจไว้แต่ยังไม่ลุย — มี TBDs</span> <span class="badge important">Important</span></h2>
+
+  <div class="group">
+    <h3><span class="icon">D</span> Email Verification (next target)</h3>
+    <table>
+      <thead><tr><th>ID</th><th>ประเด็น</th><th>สถานะ</th><th>หมายเหตุ</th><th>คุย</th></tr></thead>
+      <tbody>
+        <tr><td class="id">D1</td><td class="title">Email provider</td><td class="status"><span class="status-pill tbd">TBD</span></td><td class="note">Resend (ง่าย จ่ายเงิน) vs MailChannels (ฟรี CF only)</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">D2</td><td class="title">Email template + sender domain</td><td class="status"><span class="status-pill tbd">TBD</span></td><td class="note">ออกแบบ template + ตั้ง DNS sender</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">D3</td><td class="title">Link expiration</td><td class="status"><span class="status-pill tbd">TBD</span></td><td class="note">24h / 7d?</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">D4</td><td class="title">Rate limit ส่ง verify</td><td class="status"><span class="status-pill tbd">TBD</span></td><td class="note">กัน spam</td><td class="check"><input type="checkbox"></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="group">
+    <h3><span class="icon">E</span> Forgot Password</h3>
+    <table>
+      <thead><tr><th>ID</th><th>ประเด็น</th><th>สถานะ</th><th>หมายเหตุ</th><th>คุย</th></tr></thead>
+      <tbody>
+        <tr><td class="id">E1</td><td class="title">Reset flow</td><td class="status"><span class="status-pill tbd">TBD</span></td><td class="note">Link in email vs OTP?</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">E2</td><td class="title">Link expiration</td><td class="status"><span class="status-pill tbd">TBD</span></td><td class="note"></td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">E3</td><td class="title">Reset password → ตัด session</td><td class="status"><span class="status-pill tbd">TBD</span></td><td class="note">ทุก session ค้าง logout ไหม?</td><td class="check"><input type="checkbox"></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="group">
+    <h3><span class="icon">F</span> API Key Management (public API)</h3>
+    <table>
+      <thead><tr><th>ID</th><th>ประเด็น</th><th>สถานะ</th><th>หมายเหตุ</th><th>คุย</th></tr></thead>
+      <tbody>
+        <tr><td class="id">F1</td><td class="title">Generate / revoke key UI</td><td class="status"><span class="status-pill tbd">TBD</span></td><td class="note"></td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">F2</td><td class="title">Scope ต่อ key</td><td class="status"><span class="status-pill tbd">TBD</span></td><td class="note">read-only / extract-only / full?</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">F3</td><td class="title">Quota ต่อ key</td><td class="status"><span class="status-pill tbd">TBD</span></td><td class="note"></td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">F4</td><td class="title">Audit log per-key</td><td class="status"><span class="status-pill tbd">TBD</span></td><td class="note"></td><td class="check"><input type="checkbox"></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="group">
+    <h3><span class="icon">G</span> Stripe Lifecycle</h3>
+    <table>
+      <thead><tr><th>ID</th><th>ประเด็น</th><th>สถานะ</th><th>หมายเหตุ</th><th>คุย</th></tr></thead>
+      <tbody>
+        <tr><td class="id">G1</td><td class="title">Cancel UX</td><td class="status"><span class="status-pill tbd">TBD</span></td><td class="note">Immediate vs end-of-period?</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">G2</td><td class="title">Pro-rated refund</td><td class="status"><span class="status-pill tbd">TBD</span></td><td class="note">นโยบายคืนเงิน</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">G3</td><td class="title">Invoice history (PDF)</td><td class="status"><span class="status-pill tbd">TBD</span></td><td class="note">ดาวน์โหลด invoice ย้อนหลัง</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">G4</td><td class="title">VAT 7% handling</td><td class="status"><span class="status-pill tbd">TBD</span></td><td class="note">ภาษีไทย — Stripe Tax / manual?</td><td class="check"><input type="checkbox"></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="group">
+    <h3><span class="icon">H</span> AI Prompt Overhaul (A2-A4)</h3>
+    <table>
+      <thead><tr><th>ID</th><th>ประเด็น</th><th>สถานะ</th><th>หมายเหตุ</th><th>คุย</th></tr></thead>
+      <tbody>
+        <tr><td class="id">H1</td><td class="title">Prompt versioning</td><td class="status"><span class="status-pill tbd">TBD</span></td><td class="note">รุ่นเก่ารอด + รุ่นใหม่ทดสอบ?</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">H2</td><td class="title">Eval / regression test</td><td class="status"><span class="status-pill tbd">TBD</span></td><td class="note">ชุดทดสอบมาตรฐาน</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">H3</td><td class="title">A/B test infra</td><td class="status"><span class="status-pill tbd">TBD</span></td><td class="note"></td><td class="check"><input type="checkbox"></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="group">
+    <h3><span class="icon">I</span> Email Notification Channel</h3>
+    <table>
+      <thead><tr><th>ID</th><th>ประเด็น</th><th>สถานะ</th><th>หมายเหตุ</th><th>คุย</th></tr></thead>
+      <tbody>
+        <tr><td class="id">I1</td><td class="title">Notification rules</td><td class="status"><span class="status-pill tbd">TBD</span></td><td class="note">ทุก event หรือเลือกได้?</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">I2</td><td class="title">Digest vs realtime</td><td class="status"><span class="status-pill tbd">TBD</span></td><td class="note">รวมรายวัน vs ส่งทันที</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">I3</td><td class="title">Unsubscribe + preference</td><td class="status"><span class="status-pill tbd">TBD</span></td><td class="note">user เลือก channel ได้</td><td class="check"><input type="checkbox"></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2 class="section-title">🧱 <span>OCR Lifecycle + Compare Rework — TBDs</span> <span class="badge tbd">รอตัดสินก่อนลุย</span></h2>
+  <div class="group">
+    <h3><span class="icon">J</span> ก่อนเริ่ม Milestone 2 / 3</h3>
+    <p style="color: var(--text-dim); font-size: 13px; margin-top: -8px;">
+      Decisions ใหญ่ 16 ข้อ (L1-L8, C1-C8) <b>locked</b> แล้ว — ดูเอกสาร <code>docs/OCR_LIFECYCLE_AND_COMPARE_REWORK_PLAN.md</code>.
+      ที่เหลือ TBD1-6 ต้องตัดสินก่อน implement M2 + M3.
+    </p>
+    <table>
+      <thead><tr><th>ID</th><th>ประเด็น</th><th>กระทบ</th><th>หมายเหตุ</th><th>คุย</th></tr></thead>
+      <tbody>
+        <tr><td class="id">TBD1</td><td class="title">จำนวนไฟล์ retention ต่อ tier</td><td class="status"><span class="status-pill tbd">M2</span></td><td class="note">Free=?, Basic=?, Pro=? — user เสนอ Free=100</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">TBD2</td><td class="title">กลยุทธ์เกินจำนวน</td><td class="status"><span class="status-pill tbd">M2</span></td><td class="note">auto-delete เก่าสุด / ask user / block upload</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">TBD3</td><td class="title">Field-based anchor scope</td><td class="status"><span class="status-pill tbd">M1+</span></td><td class="note">รองรับใน helper แล้ว — แต่ feature ยังไม่เปิด</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">TBD4</td><td class="title">Soft-delete vs hard-delete document</td><td class="status"><span class="status-pill tbd">M3</span></td><td class="note">กระทบ C5 block-on-reference</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">TBD5</td><td class="title">Compare history migration</td><td class="status"><span class="status-pill tbd">M3</span></td><td class="note">unpack row เก่า vs drop with notice</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">TBD6</td><td class="title">"Compare ไฟล์ใหม่ที่ไม่ใช่ library" UX</td><td class="status"><span class="status-pill tbd">M3</span></td><td class="note">auto-OCR แล้ว compare เลย vs require save เป็น doc ก่อน</td><td class="check"><input type="checkbox"></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2 class="section-title">📝 <span>PDF Edit Feature — Discussion (รอตัดสิน)</span> <span class="badge tbd">Discussion</span></h2>
+
+  <div class="group">
+    <h3><span class="icon">L</span> Requirements ที่ระบุแล้ว (Locked)</h3>
+    <p style="color: var(--text-dim); font-size: 13px; margin-top: -8px;">
+      เอกสารเต็มที่ <code>docs/PDF_EDIT_FEATURE_DISCUSSION.md</code> — สรุป use case: หลัง Compare เจอจุดต่าง → user แก้ PDF ให้ถูก → export
+    </p>
+    <table>
+      <thead><tr><th>ID</th><th>ประเด็น</th><th>คำตอบ</th><th>หมายเหตุ</th></tr></thead>
+      <tbody>
+        <tr><td class="id">R1</td><td class="title">กลุ่มเป้าหมาย</td><td class="status"><span class="status-pill deployed">Enterprise</span></td><td class="note">มี audit / compliance ที่เคร่งครัด</td></tr>
+        <tr><td class="id">R2</td><td class="title">ประเภท PDF</td><td class="status"><span class="status-pill deployed">Text PDF</span></td><td class="note">ไม่ใช่ scanned image</td></tr>
+        <tr><td class="id">R3</td><td class="title">ภาษา</td><td class="status"><span class="status-pill deployed">English</span></td><td class="note">ฟอนต์ standard ใช้ได้</td></tr>
+        <tr><td class="id">R4</td><td class="title">ปริมาณการแก้</td><td class="status"><span class="status-pill deployed">Batch</span></td><td class="note">แก้หลาย field ในครั้งเดียว</td></tr>
+        <tr><td class="id">R5</td><td class="title">คุณภาพ output</td><td class="status"><span class="status-pill deployed">Pixel-perfect</span></td><td class="note">ถ้าไม่ได้จริง ค่อยคุยใหม่</td></tr>
+        <tr><td class="id">R6</td><td class="title">งบประมาณ library</td><td class="status"><span class="status-pill notsafe">No budget</span></td><td class="note">ใช้ open source / free only</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="group">
+    <h3><span class="icon">M</span> 4 Options + Trade-offs</h3>
+    <table>
+      <thead><tr><th>Option</th><th>วิธี</th><th>เวลา</th><th>หมายเหตุ</th></tr></thead>
+      <tbody>
+        <tr><td class="id">A</td><td class="title">Whiteout + overlay (MVP)</td><td class="status"><span class="status-pill tbd">1-2 wk</span></td><td class="note">❌ Audit fail · ⚠️ Font ต่าง · ทำงานทุก PDF</td></tr>
+        <tr><td class="id">B</td><td class="title">Real content-stream edit</td><td class="status"><span class="status-pill tbd">4-6 wk</span></td><td class="note">✅ Audit pass · ✅ Pixel-perfect · ❌ Fragile, maintenance สูง</td></tr>
+        <tr><td class="id">C</td><td class="title">⭐ Hybrid (whiteout + XMP audit log)</td><td class="status"><span class="status-pill tbd">2-3 wk</span></td><td class="note">✅ Audit-clean ผ่าน XMP · ⚠️ ยัง font ต่าง · AI แนะนำ</td></tr>
+        <tr><td class="id">D</td><td class="title">Generate "Corrected PDF" ใหม่</td><td class="status"><span class="status-pill tbd">2-3 wk</span></td><td class="note">✅ Audit-clean · ⚠️ Layout เปลี่ยน · เหมาะ structured form</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="group">
+    <h3><span class="icon">Q</span> 10 คำถามต้องตอบก่อนลุย</h3>
+    <table>
+      <thead><tr><th>ID</th><th>คำถาม</th><th>กระทบ</th><th>คุย</th></tr></thead>
+      <tbody>
+        <tr><td class="id">Q1</td><td class="title">Audit fail = hard blocker?</td><td class="note">Whiteout ทำให้ text เดิมซ่อนอยู่ ผ่าน forensic เจอ</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">Q2</td><td class="title">Layout เปลี่ยนได้ไหม?</td><td class="note">Option D สร้างใหม่ → คงค่าครบแต่หน้าตาต่าง original</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">Q3</td><td class="title">XMP audit trail พอไหม?</td><td class="note">ตอบ compliance ของ Enterprise ได้จริงหรือต้องของเดิมหายจริง</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">Q4</td><td class="title">Pixel-perfect vs Audit-clean</td><td class="note">เลือกอะไรก่อนถ้าเลือกได้ทั้งคู่ไม่ได้</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">Q5</td><td class="title">Font tolerance</td><td class="note">Helvetica แทนของเดิม + watermark "EDITED" รับได้ไหม</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">Q6</td><td class="title">Use case จริง: form / invoice / contract / freeform?</td><td class="note">Option D เหมาะกับ structured form มาก</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">Q7</td><td class="title">Maintenance budget สำหรับ Option B</td><td class="note">ทีมพร้อมดูแล PDF parsing edge cases ระยะยาวไหม</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">Q8</td><td class="title">Bulk apply UX</td><td class="note">กดปุ่มเดียวแก้ทุกความต่าง vs ทีละ field</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">Q9</td><td class="title">Permissions / audit per user</td><td class="note">ใครแก้ได้บ้าง? log per user? sign-off step?</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">Q10</td><td class="title">เก็บ original + edited ทั้งคู่?</td><td class="note">Versioning ใน R2 — ผูกกับ M2 retention</td><td class="check"><input type="checkbox"></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="group">
+    <h3><span class="icon">⚖</span> ความเสี่ยง Legal / Compliance</h3>
+    <table>
+      <thead><tr><th>Risk</th><th>คำอธิบาย</th><th>คุย</th></tr></thead>
+      <tbody>
+        <tr><td class="title">Document integrity</td><td class="note">การแก้ PDF ของลูกค้า → อาจถือ "ปลอมแปลงเอกสาร" (โดยเฉพาะใบกำกับภาษี, สัญญา)</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="title">Audit trail requirement</td><td class="note">PDPA + SOX + ISO 27001 มักต้องการ tamper-evident audit log</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="title">e-Signature impact</td><td class="note">PDF ที่มี digital signature → การแก้ทำให้ signature invalid</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="title">Original preservation</td><td class="note">บางประเทศบังคับเก็บ original — แก้ = สร้าง version ใหม่</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="title">Permission to edit</td><td class="note">ToS / สัญญากับลูกค้า — ให้สิทธิเราแก้ไหม</td><td class="check"><input type="checkbox"></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2 class="section-title">🟢 <span>Roadmap ยาว — ยังไม่เริ่ม</span> <span class="badge strategic">Strategic</span></h2>
+  <div class="group">
+    <h3><span class="icon">K</span> Phases 4-7</h3>
+    <table>
+      <thead><tr><th>Phase</th><th>หัวข้อ</th><th>สถานะ</th><th>Decision ที่ค้าง</th><th>คุย</th></tr></thead>
+      <tbody>
+        <tr><td class="id">P4</td><td class="title">Confidence soft/hard threshold</td><td class="status"><span class="status-pill notyet">ยังไม่เริ่ม</span></td><td class="note">threshold ทั้งสองชั้น = เท่าไหร่? Behavior ต่างยังไง?</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">P5</td><td class="title">EAV + search</td><td class="status"><span class="status-pill notyet">ยังไม่เริ่ม</span></td><td class="note">schema design? D1 FTS vs external search engine?</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">P6</td><td class="title">Rulebase Tier 1</td><td class="status"><span class="status-pill notyet">ยังไม่เริ่ม</span></td><td class="note">DSL syntax? UI builder?</td><td class="check"><input type="checkbox"></td></tr>
+        <tr><td class="id">P7</td><td class="title">NL → Rule compiler</td><td class="status"><span class="status-pill notyet">ยังไม่เริ่ม</span></td><td class="note">LLM call cost per rule? Validation?</td><td class="check"><input type="checkbox"></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2 class="section-title">🎯 ลำดับความเร่งด่วนที่แนะนำ</h2>
+  <div class="order-list">
+    <ol>
+      <li><strong>🔥 เดือนนี้:</strong> A1-A4 PDPA / Privacy / Sensitive masking — กฎหมาย/ความเสี่ยงธุรกิจ</li>
+      <li><strong>🔥 เดือนนี้:</strong> A7 — เช็คสถานะ public API ว่าเปิดให้ใครเรียกได้</li>
+      <li><strong>🔥 เดือนนี้:</strong> B1 — Rate limit per user เพื่อกัน bill พุ่ง</li>
+      <li><strong>🔥 เดือนนี้:</strong> A5 + A6 — cleanup เล็กๆ (10-30 นาที)</li>
+      <li><strong>🟡 1-2 เดือน:</strong> OCR Lifecycle <b>M1</b> (re-upload dedup + stamp) — เริ่มได้ทันที</li>
+      <li><strong>🟡 1-2 เดือน:</strong> D + E — Email verification + Forgot password</li>
+      <li><strong>🟡 1-2 เดือน:</strong> B2-B5 — ops/cost monitoring maturity</li>
+      <li><strong>🟢 ตามแผน:</strong> OCR Lifecycle M2-M3 (หลัง TBD1-6 ตัดสิน)</li>
+      <li><strong>🟢 ตามแผน:</strong> F — API key management (เปิด commercial)</li>
+      <li><strong>🟢 ตามแผน:</strong> G — Stripe lifecycle</li>
+      <li><strong>🟢 ตามแผน:</strong> Phase 4-7 — long-term roadmap</li>
+    </ol>
+  </div>
+</section>
+
+<footer>
+  เอกสารอ้างอิง: <code>docs/OCR_LIFECYCLE_AND_COMPARE_REWORK_PLAN.md</code> ·
+  <code>docs/PDF_EDIT_FEATURE_DISCUSSION.md</code> ·
+  <code>docs/PENDING_FEATURES_BACKLOG.md</code> ·
+  <code>docs/170626/SECURITY_AUDIT.md</code> ·
+  <code>docs/MIGRATION.md</code> §9
+  <br><br>
+  Generated 2026-06-18 by Claude Code — เปิดไฟล์ HTML นี้ใน browser, พิมพ์เป็น PDF, หรือ share ทีมได้
+</footer>
+
+</div>
+</body>
+</html>

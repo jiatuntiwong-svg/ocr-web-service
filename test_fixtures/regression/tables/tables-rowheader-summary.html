@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>OCR-2 fixture: tables/tables-rowheader-summary</title>
+<style>
+  body { font-family: "Times New Roman", serif; color: #000; margin: 0; padding: 40px; font-size: 15pt; }
+  h1 { font-size: 20pt; margin: 0 0 16px 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 16pt; }
+  th, td { border: 1px solid #000; padding: 10px 14px; }
+  th { background: #e0e0e0; text-align: left; width: 30%; }
+  td { text-align: right; }
+</style>
+</head>
+<body>
+  <h1>Row-Header Summary</h1>
+  <table>
+    <tr><th>Total Revenue</th><td>1,250,000</td></tr>
+    <tr><th>Total Cost</th><td>780,000</td></tr>
+    <tr><th>Gross Margin</th><td>470,000</td></tr>
+    <tr><th>Units Sold</th><td>3,400</td></tr>
+    <tr><th>Refunds</th><td>25,000</td></tr>
+  </table>
+  <p style="margin-top:20px; font-size:12pt;">Row-header table (header is leftmost column, values in right column). Structural extraction must preserve label→value pairing.</p>
+</body>
+</html>

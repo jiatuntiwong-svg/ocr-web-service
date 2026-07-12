@@ -117,6 +117,28 @@ export default function APISettingsView() {
         }
     };
 
+    const handleTestConnection = async (cfg: AIConfig) => {
+        setSubmitting(true);
+        try {
+            const res = await fetch("/api/admin/settings/test", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ id: cfg.id }),
+            });
+            const data = await res.json() as any;
+            if (res.ok && data?.ok) {
+                showToast(`${cfg.provider} / ${cfg.model} ✓`, "success");
+            } else {
+                // Server never returns the raw key — codes only (SEC-6).
+                showToast(t("errors.saveFailed"), "error");
+            }
+        } catch (e) {
+            showToast(friendlyError(e, t, { context: "api-settings-test", fallbackKey: "errors.saveFailed" }), "error");
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
     const handleToggleActive = async (cfg: AIConfig) => {
         setSubmitting(true);
         try {
@@ -165,7 +187,8 @@ export default function APISettingsView() {
                                     value={form.provider}
                                     onChange={e => setForm({ ...form, provider: e.target.value })}
                                 >
-                                    <option value="gemini">Google Gemini</option>
+                                    <option value="gemini">Google Gemini (AI Studio)</option>
+                                    <option value="vertex_ai">Vertex AI (Express)</option>
                                     <option value="openai">OpenAI</option>
                                     <option value="openrouter">OpenRouter</option>
                                 </select>
@@ -232,6 +255,7 @@ export default function APISettingsView() {
                                     <div className="flex justify-between items-start mb-2">
                                         <div className="flex flex-col">
                                             <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-md w-fit mb-1 ${cfg.provider === 'gemini' ? 'bg-blue-100 text-blue-600' :
+                                                cfg.provider === 'vertex_ai' ? 'bg-sky-100 text-sky-600' :
                                                 cfg.provider === 'openai' ? 'bg-emerald-100 text-emerald-600' : 'bg-violet-100 text-violet-600'
                                                 }`}>
                                                 {cfg.provider}
@@ -265,6 +289,14 @@ export default function APISettingsView() {
                                             className="text-[10px] text-blue-600 font-bold hover:underline"
                                         >
                                             Edit
+                                        </button>
+                                        <button
+                                            onClick={() => handleTestConnection(cfg)}
+                                            disabled={submitting}
+                                            className="text-[10px] text-emerald-600 font-bold hover:underline"
+                                            title="ทดสอบการเชื่อมต่อ"
+                                        >
+                                            Test
                                         </button>
                                     </div>
                                     {!cfg.isEnv && (

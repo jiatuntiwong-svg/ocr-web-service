@@ -1,0 +1,27 @@
+{
+  "suite": "TEST-1",
+  "description": "Control test: is ผู้รับโอน failure caused by multi-page stacking or by the bbox_hint mechanism itself?",
+  "defaults": {
+    "templateName": "${OCR_E2E_TEMPLATE_NAME}",
+    "targetField": "ผู้รับโอน",
+    "expected": "คลังภาคบริการโลหิตแห่งชาติที่ 3 จ.ชลบุรี\nวัตถุดิบและงานระหว่างทำ",
+    "runs": 3
+  },
+  "cases": [
+    {
+      "id": "page1-only",
+      "file": "test_fixtures/thai-form/page1-only.pdf",
+      "note": "Isolates page 1 — if hint mechanism works, this should hit ≥ 2/3."
+    },
+    {
+      "id": "full-7page",
+      "file": "test_fixtures/thai-form/full-7page.pdf",
+      "note": "Baseline reproduction. Expected to fail (cross-page label confusion)."
+    }
+  ],
+  "interpretation": {
+    "multi_page_is_culprit": "page1-only ≥ 2/3 AND full-7page fails → API-1/UI-1 (page selection) is the fix",
+    "hint_mechanism_broken": "page1-only ≤ 1/3 → escalate to OCR-5 (guardrails)",
+    "both_pass": "check OCR-4 deploy status — fix may already be live"
+  }
+}

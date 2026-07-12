@@ -30,7 +30,29 @@ export const PER_FILE_TIMEOUT_MS = 120_000;
  *  finishes, so 1 s gives near-real-time feel without flooding the worker. */
 export const POLL_INTERVAL_MS = 1000;
 
+/** Max PDF pages a user can select (or that a PDF may contain when no
+ *  selection is provided) before /api/upload rejects with `TOO_MANY_PAGES`.
+ *  10+ page PDFs take multi-minute AI runs (issue 1.3) — the UI page-picker
+ *  (UI-1) forces users to pick ≤ this many pages, and the server enforces
+ *  the same ceiling as the last line of defence. Override with
+ *  NEXT_PUBLIC_PAGE_SELECTION_MAX in .env.local. */
+export const PAGE_SELECTION_MAX =
+    Number(process.env.NEXT_PUBLIC_PAGE_SELECTION_MAX) || 5;
+
 /** Threshold (in number of files) above which the single-file UI switches
  *  to the batch UI. 1 still uses the existing single-doc workspace so we
  *  don't regress that UX. */
 export const BATCH_UI_THRESHOLD = 2;
+
+/** Max upload size (MB) enforced by /api/upload and /api/v1/extract before
+ *  buffering the file (API-3, PENDING_ISSUES §F4). Matches the
+ *  "สูงสุด 20MB" copy shown in the upload UI (see i18n `uploadSubtext`).
+ *  Larger files can OOM the canvas / Worker on rasterization, and burn
+ *  credits before rejection — so the guard runs BEFORE credit deduction,
+ *  R2 upload, and arrayBuffer(). Tune here to change both routes at once.
+ *  Override with NEXT_PUBLIC_MAX_UPLOAD_SIZE_MB in .env.local. */
+export const MAX_UPLOAD_SIZE_MB =
+    Number(process.env.NEXT_PUBLIC_MAX_UPLOAD_SIZE_MB) || 20;
+
+/** Derived byte limit for the size comparison — File.size is bytes. */
+export const MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;

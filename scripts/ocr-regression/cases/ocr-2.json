@@ -1,0 +1,68 @@
+{
+  "suite": "OCR-2",
+  "description": "Prompt regression suite — 5 known failure patterns from Session 2026-07-02 (docs/OCR_TESTING_LOG.md §1 and §2). Each run 3x for variance-aware pass rates.",
+  "defaults": {
+    "templateName": "${OCR_E2E_REGRESSION_TEMPLATE}",
+    "runs": 3
+  },
+  "cases": [
+    {
+      "id": "verbatim-plastelet",
+      "description": "Issue 1.1 — AI must NOT silently auto-correct 'Plastelet' → 'Platelet'. Either verbatim OR corrections[] entry.",
+      "file": "test_fixtures/regression/generated/verbatim-plastelet.pdf",
+      "targetField": "Product",
+      "assertion": "verbatim",
+      "expect": { "expected": "Plastelet" }
+    },
+    {
+      "id": "prefix-retention",
+      "description": "Issue 2.2 — leading 'คลัง' must not be dropped as a label prefix.",
+      "file": "test_fixtures/regression/generated/prefix-retention.pdf",
+      "targetField": "หน่วยงาน",
+      "assertion": "prefix",
+      "expect": {
+        "expected": "คลังภาคบริการโลหิตแห่งชาติที่ 7 จ.อุบลราชธานี",
+        "prefix": "คลัง"
+      }
+    },
+    {
+      "id": "multiline-join",
+      "description": "Issue 2.1 — two-line value under one label must return both lines joined by literal \\n.",
+      "file": "test_fixtures/regression/generated/multiline-join.pdf",
+      "targetField": "ผู้รับโอน",
+      "assertion": "multiline",
+      "expect": {
+        "lines": [
+          "คลังภาคบริการโลหิตแห่งชาติที่ 3 จ.ชลบุรี",
+          "วัตถุดิบและงานระหว่างทำ"
+        ]
+      }
+    },
+    {
+      "id": "column-disambiguation",
+      "description": "Issue 1.4 — two adjacent labels with similar prefix; AI must return TARGET column value, not sibling. Uses default template WITHOUT bbox_hint so the test is meaningful (spatial anchor would trivially pass).",
+      "file": "test_fixtures/regression/generated/column-disambiguation.pdf",
+      "targetField": "Receiver",
+      "assertion": "disambiguation",
+      "expect": {
+        "expected": "Warehouse B",
+        "sibling": "Warehouse A"
+      }
+    },
+    {
+      "id": "corrections-recieve",
+      "description": "Issue 1.1 — genuine typo 'recieve'. Pass = (a) return 'recieve' verbatim, or (b) return 'receive' AND populate corrections[] with original→corrected. Silent correction FAILS.",
+      "file": "test_fixtures/regression/generated/corrections-recieve.pdf",
+      "targetField": "Action",
+      "assertion": "corrections_report",
+      "expect": {
+        "original": "recieve",
+        "corrected": "receive"
+      }
+    }
+  ],
+  "notes": {
+    "template_hint_policy": "For column-disambiguation the template MUST have NO bbox_hint on the Receiver field. Otherwise the spatial anchor makes the test trivially pass and provides no regression value. Configure OCR_E2E_REGRESSION_TEMPLATE to point to a template that satisfies this.",
+    "v1_extract_bypass_warning": "This suite MUST run through the UI harness. /api/v1/extract skips the client-side PDF→3600px PNG conversion — different bytes reach the model. Do not point this suite at v1/extract."
+  }
+}

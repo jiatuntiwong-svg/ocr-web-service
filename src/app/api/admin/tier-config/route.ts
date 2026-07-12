@@ -5,6 +5,7 @@ import {
     loadTierCredits, loadFeatureFlags,
     sanitizeTierCredits, sanitizeFeatureFlags,
 } from "@/lib/tier-config";
+import { CREDIT_MODELS, getActiveCreditModel, sanitizeCreditModel } from "@/lib/pricing";
 import { fail, ErrorCode } from "@/lib/apiResponse";
 import { requireAdmin } from "@/lib/auth/guards";
 
@@ -32,9 +33,10 @@ export async function GET(req: NextRequest) {
         if (!env?.DB) {
             return NextResponse.json({ success: true, warning: "DB unavailable" });
         }
-        const [credits, flags] = await Promise.all([
+        const [credits, flags, creditModel] = await Promise.all([
             loadTierCredits(env),
             loadFeatureFlags(env),
+            getActiveCreditModel(env),
         ]);
         return NextResponse.json({
             success: true,
@@ -42,6 +44,10 @@ export async function GET(req: NextRequest) {
             features: FEATURES,
             credits,
             flags,
+            // BILL-1: expose active OCR credit model + valid options so the
+            // admin UI can render a switch without needing a separate endpoint.
+            credit_model: creditModel,
+            credit_models: CREDIT_MODELS,
         });
     } catch (error: any) {
         console.error("[Admin Tier-Config GET]", error);
@@ -56,7 +62,7 @@ export async function POST(req: NextRequest) {
         const { env } = await getCloudflareContext();
         if (!env?.DB) return fail(ErrorCode.SERVER_ERROR, { detail: "no DB binding", context: "admin-tier" });
 
-        const body = await req.json() as { credits?: unknown; flags?: unknown };
+        const body = await req.json() as { credits?: unknown; flags?: unknown; credit_model?: unknown };
 
         if (body.credits !== undefined) {
             await saveSetting(env, "TIER_CREDITS", sanitizeTierCredits(body.credits));
@@ -64,12 +70,19 @@ export async function POST(req: NextRequest) {
         if (body.flags !== undefined) {
             await saveSetting(env, "FEATURE_FLAGS", sanitizeFeatureFlags(body.flags));
         }
+        if (body.credit_model !== undefined) {
+            // BILL-1: sanitize down to the known slug set so an admin can't
+            // wedge a typo into the config (would silently fall back to
+            // default anyway, but noise in the log is worse).
+            await saveSetting(env, "CREDIT_MODEL", sanitizeCreditModel(body.credit_model));
+        }
 
-        const [credits, flags] = await Promise.all([
+        const [credits, flags, creditModel] = await Promise.all([
             loadTierCredits(env),
             loadFeatureFlags(env),
+            getActiveCreditModel(env),
         ]);
-        return NextResponse.json({ success: true, credits, flags });
+        return NextResponse.json({ success: true, credits, flags, credit_model: creditModel });
     } catch (error: any) {
         console.error("[Admin Tier-Config POST]", error);
         return fail(ErrorCode.SERVER_ERROR, { detail: error, context: "admin-tier" });

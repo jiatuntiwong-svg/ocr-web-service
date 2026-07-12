@@ -17,6 +17,14 @@ interface ExcelPreviewProps {
     highlightColor?: string;
 }
 
+// Per-cell colors driven by the highlight's `isDiff` flag. If the flag is
+// missing we fall back to `highlightColor` (single-tone — used when callers
+// don't know diff state, e.g. plain OCR preview).
+const DIFF_BG = "rgba(239, 68, 68, 0.32)";
+const DIFF_BORDER = "rgba(239, 68, 68, 0.9)";
+const MATCH_BG = "rgba(16, 185, 129, 0.32)";
+const MATCH_BORDER = "rgba(16, 185, 129, 0.9)";
+
 export default function ExcelPreview({ file, highlights = [], highlightColor = "rgba(59, 130, 246, 0.35)" }: ExcelPreviewProps) {
     const [sheets, setSheets] = useState<ExcelSheet[]>([]);
     const [active, setActive] = useState(0);
@@ -52,10 +60,12 @@ export default function ExcelPreview({ file, highlights = [], highlightColor = "
         return () => clearTimeout(t);
     }, [highlights, sheets.length, active]);
 
-    const highlightSet = useMemo(() => {
-        const s = new Set<string>();
-        highlights.forEach(h => s.add(`${h.sheet}:${h.row}:${h.col}`));
-        return s;
+    // Map key → isDiff flag for the cell (undefined if caller didn't pass
+    // isDiff — drops back to the legacy single-color path).
+    const highlightMap = useMemo(() => {
+        const m = new Map<string, boolean | undefined>();
+        highlights.forEach(h => m.set(`${h.sheet}:${h.row}:${h.col}`, h.isDiff));
+        return m;
     }, [highlights]);
 
     if (error) {
@@ -123,21 +133,37 @@ export default function ExcelPreview({ file, highlights = [], highlightColor = "
                                 <th style={{ ...headerCellStyle, position: "sticky", left: 0, zIndex: 1 }}>{r + 1}</th>
                                 {Array.from({ length: sheet.colCount }, (_, c) => {
                                     const key = `${active}:${r}:${c}`;
-                                    const isHighlighted = highlightSet.has(key);
+                                    const isHighlighted = highlightMap.has(key);
+                                    const isDiff = highlightMap.get(key);
                                     const cell = row[c];
+                                    // Pick color: red = diff, green = match, blue = legacy fallback.
+                                    const bg = !isHighlighted
+                                        ? "transparent"
+                                        : isDiff === true
+                                            ? DIFF_BG
+                                            : isDiff === false
+                                                ? MATCH_BG
+                                                : highlightColor;
+                                    const border = !isHighlighted
+                                        ? "1px solid var(--color-border)"
+                                        : isDiff === true
+                                            ? `1px solid ${DIFF_BORDER}`
+                                            : isDiff === false
+                                                ? `1px solid ${MATCH_BORDER}`
+                                                : "1px solid var(--color-border)";
                                     return (
                                         <td
                                             key={c}
                                             ref={el => { if (el) cellRefs.current.set(key, el); else cellRefs.current.delete(key); }}
                                             style={{
-                                                border: "1px solid var(--color-border)",
+                                                border,
                                                 padding: "3px 6px",
                                                 minWidth: 60, maxWidth: 220,
                                                 color: "var(--color-text-1)",
-                                                background: isHighlighted ? highlightColor : "transparent",
+                                                background: bg,
                                                 whiteSpace: "nowrap",
                                                 overflow: "hidden", textOverflow: "ellipsis",
-                                                transition: "background 0.2s",
+                                                transition: "background 0.2s, border-color 0.2s",
                                             }}
                                             title={cell != null ? String(cell) : ""}
                                         >

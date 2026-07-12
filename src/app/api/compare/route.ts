@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { logSystemEvent } from "@/lib/logger";
 import { generateWithAI, getActiveAIConfigs } from "@/lib/ai-handler";
+import { loadRulesForInjection, logRuleConsidered } from "@/lib/rulebase/inject";
+import { ENABLE_TEMPLATE_RULEBASE } from "@/lib/featureFlags";
 import { logAiUsage } from "@/lib/ai-usage";
 import { loadFeatureFlags, isFeatureEnabled } from "@/lib/tier-config";
 import { estimateCredits, actualCredits } from "@/lib/pricing";
@@ -206,6 +208,10 @@ export async function POST(req: NextRequest) {
         if (selectedFields.length === 0) {
             return fail(ErrorCode.MISSING_FIELDS, { context: "compare" });
         }
+        // Phase D — optional template anchor for rule injection. Stays null
+        // when the caller (legacy clients, no-template compares) doesn't
+        // provide one; rule injection helper short-circuits in that case.
+        const templateId = (formData.get("templateId") as string | null) || null;
 
         // Verdict mode — selectable per run. Default "smart" preserves the
         // current behaviour for callers that don't send the field.
@@ -252,7 +258,14 @@ export async function POST(req: NextRequest) {
             .filter((config) => config.provider === target.provider && config.model === target.model)
             .map((config) => config.apiKey);
 
-        const prompt = buildPrompt(cleanSelectedFields, files.length, fieldTypes);
+        let prompt = buildPrompt(cleanSelectedFields, files.length, fieldTypes);
+        // Phase D: inject template rules from prior corrections (when flag on).
+        // Helper short-circuits when templateId is null or no rules exist —
+        // safe to call unconditionally.
+        const ruleInject = ENABLE_TEMPLATE_RULEBASE
+            ? await loadRulesForInjection(env, templateId, cleanSelectedFields)
+            : { rules: [], promptBlock: "" };
+        if (ruleInject.promptBlock) prompt += "\n\n" + ruleInject.promptBlock;
 
         // ─── Edge cache lookup ─────────────────────────────────────────────
         // Identical (files + selected fields + model) → return cached AI body.
@@ -568,6 +581,15 @@ export async function POST(req: NextRequest) {
             }
         }
 
+        // Phase D: log every considered rule + return summary to client so
+        // it can render "rule fired" badges. Fire-and-forget on the log side
+        // (caller doesn't need to wait), but pass IDs synchronously so the
+        // response carries them.
+        if (ruleInject.rules.length) {
+            logRuleConsidered(env, ruleInject.rules.map(r => r.id), null)
+                .catch(() => { /* non-fatal */ });
+        }
+
         return ok({
             success: true,
             processing_time_ms: processingTimeMs,
@@ -575,6 +597,12 @@ export async function POST(req: NextRequest) {
             extracted_data: extracted,
             credits_used: actualCreditsUsed,
             credits_estimate: compareEstimate.credits,
+            rules_applied: ruleInject.rules.map(r => ({
+                id: r.id,
+                type: r.type,
+                naturalLang: r.naturalLang,
+                target: r.target ?? null,
+            })),
         });
     } catch (error: any) {
         try {

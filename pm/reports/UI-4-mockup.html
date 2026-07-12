@@ -1,0 +1,1298 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>UI-4 Mockup — OCR Workspace Decluttering</title>
+<style>
+  /* ── Design tokens pulled from src/app/globals.css (dark default) ──────── */
+  :root {
+    --color-bg-body:     #07111e;
+    --color-bg-surface:  #0a1628;
+    --color-bg-panel:    #0c1526;
+    --color-bg-card:     #112036;
+    --color-bg-elevated: #162944;
+
+    --color-border:        rgba(255, 255, 255, 0.06);
+    --color-border-strong: rgba(255, 255, 255, 0.12);
+
+    --color-text-1: #e8edf5;
+    --color-text-2: #94a3b8;
+    --color-text-3: #4a6280;
+    --color-text-4: #2d4260;
+
+    --color-accent:        #06b6d4;
+    --color-accent-dim:    #06b6d41a;
+    --color-accent-border: #06b6d433;
+
+    --color-success: #10b981;
+    --color-warning: #f59e0b;
+    --color-danger:  #ef4444;
+    --color-info:    #3b82f6;
+
+    --color-ocr:     #6366f1;
+    --color-rule:    #a855f7;
+    --color-raw:     #ef4444;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--color-bg-body);
+    color: var(--color-text-1);
+    font-family: 'Noto Sans Thai', system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ── Page shell ────────────────────────────────────────────────────────── */
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 32px 24px 64px; }
+
+  h1, h2, h3, h4 { margin: 0; color: var(--color-text-1); }
+  h1 { font-size: 26px; font-weight: 700; letter-spacing: -0.01em; }
+  h2 { font-size: 20px; font-weight: 700; }
+  h3 { font-size: 15px; font-weight: 600; }
+  p  { margin: 0; color: var(--color-text-2); }
+  code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px;
+         background: var(--color-bg-elevated); padding: 1px 6px; border-radius: 4px;
+         color: var(--color-text-1); }
+
+  .subtle { color: var(--color-text-2); font-size: 13px; }
+  .muted  { color: var(--color-text-3); }
+  .en     { color: var(--color-text-3); font-size: 11.5px; margin-left: 6px; }
+  .en-block { color: var(--color-text-3); font-size: 11px; font-weight: 400;
+              text-transform: none; letter-spacing: 0; margin-top: 2px; }
+
+  /* ── Intro / doc sections (outside app frame) ──────────────────────────── */
+  .doc-section {
+    background: var(--color-bg-panel);
+    border: 1px solid var(--color-border);
+    border-radius: 16px;
+    padding: 24px 28px;
+    margin-bottom: 32px;
+  }
+  .doc-section h2 { margin-bottom: 12px; }
+  .doc-section ul { margin: 12px 0 0 0; padding-left: 20px; color: var(--color-text-2); }
+  .doc-section li { margin-bottom: 8px; line-height: 1.55; }
+  .doc-section li strong { color: var(--color-text-1); font-weight: 600; }
+
+  /* ── Section banner (state label) ──────────────────────────────────────── */
+  .state-banner {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 20px;
+    background: linear-gradient(90deg, var(--color-accent-dim), transparent);
+    border: 1px solid var(--color-accent-border);
+    border-radius: 12px;
+    margin: 40px 0 16px;
+  }
+  .state-banner .num {
+    width: 28px; height: 28px; border-radius: 50%;
+    background: var(--color-accent); color: #0a1628;
+    font-weight: 800; font-size: 14px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .state-banner h2 { font-size: 17px; }
+
+  /* ── App frame (simulated workspace) ───────────────────────────────────── */
+  .app {
+    background: var(--color-bg-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 20px;
+    overflow: hidden;
+    box-shadow: 0 12px 32px rgba(0,0,0,0.35);
+  }
+
+  /* Top bar (mocked simply — real TopBar exists in AppShell) */
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-bg-panel);
+  }
+  .topbar .title { font-weight: 700; font-size: 15px; letter-spacing: -0.01em; }
+  .topbar .chips { display: flex; gap: 8px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border-radius: 999px;
+    font-size: 11.5px; font-weight: 600;
+    background: var(--color-bg-elevated); color: var(--color-text-2);
+    border: 1px solid var(--color-border);
+  }
+  .chip.accent { background: var(--color-accent-dim); color: var(--color-accent);
+                 border-color: var(--color-accent-border); }
+
+  /* ── Stepper ───────────────────────────────────────────────────────────── */
+  .stepper {
+    display: flex; align-items: stretch; gap: 4px;
+    padding: 12px 20px;
+    background: var(--color-bg-panel);
+    border-bottom: 1px solid var(--color-border);
+    overflow-x: auto;
+  }
+  .step {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 14px;
+    border-radius: 10px;
+    font-size: 12.5px;
+    color: var(--color-text-3);
+    background: transparent;
+    border: 1px solid transparent;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .step .dot {
+    width: 20px; height: 20px; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-strong);
+    color: var(--color-text-3);
+  }
+  .step.done { color: var(--color-text-2); }
+  .step.done .dot { background: var(--color-success); color: #0a1628; border-color: transparent; }
+  .step.current { color: var(--color-text-1); background: var(--color-accent-dim);
+                  border-color: var(--color-accent-border); font-weight: 600; }
+  .step.current .dot { background: var(--color-accent); color: #0a1628; border-color: transparent; }
+  .step-sep { color: var(--color-text-4); display: flex; align-items: center; font-size: 14px; padding: 0 2px; }
+
+  /* ── Two-zone layout ───────────────────────────────────────────────────── */
+  .zones { display: grid; grid-template-columns: 1fr 380px; gap: 0;
+           min-height: 620px; background: var(--color-bg-body); }
+  .zone-left  { padding: 20px; border-right: 1px solid var(--color-border); }
+  .zone-right { padding: 20px; background: var(--color-bg-panel); overflow-y: auto; }
+
+  @media (max-width: 900px) {
+    .zones { grid-template-columns: 1fr; }
+    .zone-left { border-right: none; border-bottom: 1px solid var(--color-border); }
+  }
+
+  /* ── Preview area (left) ───────────────────────────────────────────────── */
+  .preview-frame {
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    padding: 12px;
+    min-height: 460px;
+    display: flex; flex-direction: column;
+    position: relative;
+  }
+  .preview-toolbar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; margin-bottom: 12px;
+  }
+  .preview-toolbar-left { display: flex; align-items: center; gap: 6px; }
+  .icon-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 32px; height: 32px; border-radius: 8px;
+    background: var(--color-bg-elevated); color: var(--color-text-2);
+    border: 1px solid var(--color-border);
+    cursor: pointer; font-size: 14px;
+  }
+  .icon-btn:hover { color: var(--color-text-1); border-color: var(--color-border-strong); }
+
+  /* Fake document page */
+  .doc-page {
+    flex: 1;
+    background: #f8fafc;
+    color: #0f172a;
+    border-radius: 8px;
+    padding: 28px 32px;
+    position: relative;
+    min-height: 380px;
+    font-family: "Sarabun", "Noto Sans Thai", system-ui, sans-serif;
+    overflow: hidden;
+  }
+  .doc-page .form-title {
+    text-align: center; font-weight: 800; font-size: 15px;
+    letter-spacing: 0.02em; padding-bottom: 6px;
+    border-bottom: 2px solid #0f172a; margin-bottom: 14px;
+  }
+  .doc-page .form-row { display: flex; gap: 12px; margin-bottom: 10px; font-size: 12px; }
+  .doc-page .form-row .lbl { color: #475569; min-width: 88px; }
+  .doc-page .form-row .val { color: #0f172a; font-weight: 500; border-bottom: 1px dotted #94a3b8; flex: 1; padding-bottom: 2px; }
+  .doc-page table.mock-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 11.5px; }
+  .doc-page table.mock-table th, .doc-page table.mock-table td {
+    border: 1px solid #64748b; padding: 6px 8px; text-align: left;
+  }
+  .doc-page table.mock-table th { background: #e2e8f0; font-weight: 600; }
+
+  /* Hint pin overlay */
+  .hint-pin {
+    position: absolute;
+    border: 2px dashed var(--color-danger);
+    background: rgba(239, 68, 68, 0.08);
+    border-radius: 4px;
+    pointer-events: none;
+  }
+  .hint-pin::before {
+    content: attr(data-label);
+    position: absolute; top: -22px; left: -2px;
+    background: var(--color-danger); color: white;
+    font-size: 10.5px; font-weight: 600;
+    padding: 2px 6px; border-radius: 4px;
+    white-space: nowrap;
+    font-family: 'Noto Sans Thai', sans-serif;
+  }
+
+  /* Scan-line hint (visual only, static in mockup) */
+  .scan-hint {
+    position: absolute; left: 12px; right: 12px; height: 2px;
+    top: 55%; background: linear-gradient(90deg, transparent, rgba(6,182,212,0.6), transparent);
+    box-shadow: 0 0 12px rgba(6,182,212,0.6);
+    display: none;
+  }
+  .running .scan-hint { display: block; }
+
+  /* ── Upload dropzone ───────────────────────────────────────────────────── */
+  .dropzone {
+    flex: 1; min-height: 420px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: repeating-linear-gradient(
+      45deg, transparent, transparent 8px,
+      rgba(6,182,212,0.03) 8px, rgba(6,182,212,0.03) 16px
+    );
+    border: 2px dashed var(--color-accent-border);
+    border-radius: 12px;
+    text-align: center;
+    padding: 40px 24px;
+    gap: 16px;
+  }
+  .dropzone .glyph { font-size: 44px; opacity: 0.85; }
+  .dropzone h3 { font-size: 20px; color: var(--color-text-1); }
+  .dropzone p { max-width: 320px; }
+  .dropzone .actions { display: flex; gap: 8px; margin-top: 4px; }
+
+  /* ── Page picker (below preview) ───────────────────────────────────────── */
+  .page-picker {
+    margin-top: 12px;
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .page-picker-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .page-picker-header .lbl {
+    font-size: 12px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--color-text-2);
+  }
+  .page-picker-header .actions { display: flex; gap: 6px; }
+  .mini-btn {
+    padding: 3px 10px; border-radius: 6px; font-size: 11px;
+    background: var(--color-bg-elevated); color: var(--color-text-2);
+    border: 1px solid var(--color-border); cursor: pointer;
+  }
+  .thumbs { display: flex; gap: 8px; }
+  .thumb {
+    width: 54px; height: 72px; border-radius: 6px;
+    background: #d0d7e2; color: #0f172a;
+    display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
+    padding-bottom: 4px;
+    font-size: 10px; font-weight: 600;
+    position: relative;
+    cursor: pointer; border: 2px solid transparent;
+  }
+  .thumb.selected { border-color: var(--color-accent); }
+  .thumb::after {
+    content: attr(data-page); position: absolute; top: 4px; left: 6px;
+    font-size: 9px; color: #475569;
+  }
+  .thumb.selected::before {
+    content: "✓"; position: absolute; top: 3px; right: 4px;
+    background: var(--color-accent); color: #0a1628;
+    width: 14px; height: 14px; border-radius: 50%;
+    font-size: 10px; font-weight: 800;
+    display: flex; align-items: center; justify-content: center;
+  }
+
+  /* ── Right panel: cards / sections ─────────────────────────────────────── */
+  .panel-title {
+    font-size: 11.5px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.1em; color: var(--color-text-2);
+    margin-bottom: 12px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .panel-title .stage-num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 20px; height: 20px; border-radius: 50%;
+    background: var(--color-accent); color: #0a1628;
+    font-size: 11px; font-weight: 800;
+  }
+
+  .card {
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    padding: 14px;
+    margin-bottom: 12px;
+  }
+  .card > h4 {
+    font-size: 13px; margin-bottom: 8px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+
+  /* ── Buttons ───────────────────────────────────────────────────────────── */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 10px 16px; border-radius: 10px;
+    font-size: 13.5px; font-weight: 600;
+    border: 1px solid transparent; cursor: pointer;
+    font-family: inherit;
+  }
+  .btn-primary { background: var(--color-accent); color: #0a1628; }
+  .btn-primary:hover { filter: brightness(1.08); }
+  .btn-ghost {
+    background: var(--color-bg-elevated); color: var(--color-text-1);
+    border-color: var(--color-border);
+  }
+  .btn-outline {
+    background: transparent; color: var(--color-text-1);
+    border-color: var(--color-border-strong);
+  }
+  .btn-lg { padding: 12px 20px; font-size: 14.5px; }
+  .btn-full { width: 100%; }
+
+  /* ── Templates / fields ────────────────────────────────────────────────── */
+  .template-pill {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 12px; border-radius: 10px;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border);
+  }
+  .template-pill .icon {
+    width: 30px; height: 30px; border-radius: 8px;
+    background: var(--color-accent-dim); color: var(--color-accent);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 15px;
+  }
+  .template-pill .name { font-weight: 600; font-size: 13px; }
+  .template-pill .sub { font-size: 11px; color: var(--color-text-3); }
+  .template-pill .switch-btn {
+    margin-left: auto; font-size: 11px; color: var(--color-accent);
+    background: transparent; border: 1px solid var(--color-accent-border);
+    padding: 4px 10px; border-radius: 6px; cursor: pointer;
+  }
+
+  .field-chip-row {
+    display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px;
+  }
+  .field-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 10px; border-radius: 999px;
+    background: var(--color-bg-panel);
+    border: 1px solid var(--color-border-strong);
+    font-size: 12px;
+    color: var(--color-text-1);
+    position: relative;
+  }
+  .field-chip .x { color: var(--color-text-3); font-size: 13px; margin-left: 2px; cursor: pointer; }
+  .field-chip.has-hint::before {
+    content: "📍"; font-size: 10px;
+  }
+  .field-chip.raw::before { content: "●"; color: var(--color-raw); }
+  .field-chip.is-hovered {
+    background: var(--color-accent-dim);
+    border-color: var(--color-accent);
+  }
+  .hover-tools {
+    display: none;
+    position: absolute; top: -30px; left: 50%; transform: translateX(-50%);
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: 8px;
+    padding: 4px;
+    gap: 2px;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.4);
+    z-index: 3;
+    white-space: nowrap;
+  }
+  .field-chip.is-hovered .hover-tools { display: flex; }
+  .hover-tools button {
+    background: transparent; color: var(--color-text-2);
+    border: none; padding: 4px 8px; border-radius: 4px;
+    font-size: 11px; cursor: pointer;
+  }
+  .hover-tools button:hover { background: var(--color-bg-panel); color: var(--color-text-1); }
+
+  .field-input-row {
+    display: flex; gap: 6px; margin-top: 10px;
+  }
+  .field-input-row input {
+    flex: 1; background: var(--color-bg-panel);
+    border: 1px solid var(--color-border-strong);
+    color: var(--color-text-1);
+    border-radius: 8px; padding: 8px 12px;
+    font-family: inherit; font-size: 12.5px;
+  }
+  .field-input-row input::placeholder { color: var(--color-text-3); }
+
+  /* ── Advanced expander ─────────────────────────────────────────────────── */
+  .expander {
+    border-top: 1px solid var(--color-border);
+    margin-top: 12px;
+    padding-top: 12px;
+  }
+  .expander-head {
+    display: flex; align-items: center; justify-content: space-between;
+    cursor: pointer; user-select: none;
+    padding: 6px 4px;
+    color: var(--color-text-2); font-size: 12px; font-weight: 600;
+  }
+  .expander-head:hover { color: var(--color-text-1); }
+  .expander-head::before { content: "▸"; margin-right: 6px; font-size: 10px; }
+  .expander.open .expander-head::before { content: "▾"; }
+  .expander-body { display: none; padding: 8px 4px 4px; }
+  .expander.open .expander-body { display: block; }
+  .expander-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 0; font-size: 12.5px;
+    border-bottom: 1px dashed var(--color-border);
+  }
+  .expander-row:last-child { border-bottom: none; }
+  .expander-row .rlbl { color: var(--color-text-1); }
+  .expander-row .rsub { color: var(--color-text-3); font-size: 11px; }
+
+  .toggle {
+    width: 34px; height: 20px; border-radius: 999px;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-strong);
+    position: relative; cursor: pointer;
+  }
+  .toggle::after {
+    content: ""; position: absolute; top: 2px; left: 2px;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: var(--color-text-3); transition: 0.2s;
+  }
+  .toggle.on { background: var(--color-accent-dim); border-color: var(--color-accent-border); }
+  .toggle.on::after { left: 16px; background: var(--color-accent); }
+
+  select.mini-select {
+    background: var(--color-bg-panel);
+    border: 1px solid var(--color-border-strong);
+    color: var(--color-text-1);
+    border-radius: 6px; padding: 4px 8px;
+    font-family: inherit; font-size: 12px;
+  }
+
+  /* ── Credit estimate ───────────────────────────────────────────────────── */
+  .credit-estimate {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 14px; border-radius: 10px;
+    background: linear-gradient(135deg, rgba(99,102,241,0.15), rgba(6,182,212,0.08));
+    border: 1px solid rgba(99,102,241,0.3);
+  }
+  .credit-estimate .cost {
+    font-size: 22px; font-weight: 800; color: var(--color-text-1);
+  }
+  .credit-estimate .cost small { font-size: 11px; font-weight: 500; color: var(--color-text-2);
+                                 display: block; margin-top: -2px; }
+
+  .checklist { list-style: none; padding: 0; margin: 10px 0 0; }
+  .checklist li {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12.5px; color: var(--color-text-2);
+    padding: 4px 0;
+  }
+  .checklist li::before {
+    content: "✓"; color: var(--color-success); font-weight: 700;
+  }
+
+  /* ── Result table ──────────────────────────────────────────────────────── */
+  .result-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .result-header .actions { display: flex; gap: 6px; position: relative; }
+
+  .result-table { display: flex; flex-direction: column; gap: 6px; }
+  .result-row {
+    display: grid; grid-template-columns: 1fr auto auto auto;
+    gap: 10px; align-items: center;
+    padding: 10px 12px;
+    background: var(--color-bg-card);
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    position: relative;
+  }
+  .result-row .fname {
+    font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--color-text-3); font-weight: 600;
+  }
+  .result-row .fval {
+    font-size: 13.5px; color: var(--color-text-1); font-weight: 500;
+    grid-column: 1 / -1;
+    white-space: pre-wrap;
+  }
+  .result-row .meta-row {
+    grid-column: 1 / -1;
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    margin-top: 2px;
+  }
+
+  .conf-chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 8px; border-radius: 999px;
+    font-size: 10.5px; font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .conf-hi { background: rgba(16,185,129,0.15); color: #34d399; border: 1px solid rgba(16,185,129,0.3); }
+  .conf-md { background: rgba(245,158,11,0.15); color: #fbbf24; border: 1px solid rgba(245,158,11,0.3); }
+  .conf-lo { background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.3); }
+
+  .mini-badge {
+    display: inline-flex; align-items: center; gap: 3px;
+    padding: 2px 7px; border-radius: 4px;
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .badge-corr { background: rgba(245,158,11,0.15); color: #fbbf24; border: 1px solid rgba(245,158,11,0.3); }
+  .badge-rule { background: rgba(168,85,247,0.15); color: #c084fc; border: 1px solid rgba(168,85,247,0.3); }
+  .badge-raw  { background: rgba(239,68,68,0.15);  color: #fca5a5; border: 1px solid rgba(239,68,68,0.3); }
+  .badge-src  { background: var(--color-bg-elevated); color: var(--color-text-2); border: 1px solid var(--color-border); }
+
+  .overflow-btn {
+    background: transparent; border: none; color: var(--color-text-3);
+    font-size: 18px; cursor: pointer; line-height: 1;
+    padding: 4px 8px; border-radius: 6px;
+    position: absolute; top: 8px; right: 8px;
+  }
+  .overflow-btn:hover { background: var(--color-bg-elevated); color: var(--color-text-1); }
+
+  .overflow-menu {
+    position: absolute; top: calc(100% + 6px); right: 8px;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: 10px;
+    padding: 6px; min-width: 240px;
+    box-shadow: 0 12px 32px rgba(0,0,0,0.5);
+    z-index: 5;
+  }
+  .overflow-menu button {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+    background: transparent; border: none; color: var(--color-text-1);
+    padding: 8px 10px; border-radius: 6px; text-align: left;
+    font-family: inherit; font-size: 12.5px; cursor: pointer;
+  }
+  .overflow-menu button:hover { background: var(--color-bg-panel); }
+  .overflow-menu button .om-en { color: var(--color-text-3); font-size: 10.5px; margin-left: auto; }
+  .overflow-menu hr {
+    border: none; border-top: 1px solid var(--color-border);
+    margin: 4px 0;
+  }
+
+  .export-dropdown {
+    position: absolute; top: calc(100% + 6px); right: 0;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: 10px; padding: 6px;
+    min-width: 200px; z-index: 5;
+    box-shadow: 0 12px 32px rgba(0,0,0,0.5);
+  }
+  .export-dropdown button {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+    background: transparent; border: none; color: var(--color-text-1);
+    padding: 8px 10px; border-radius: 6px; text-align: left;
+    font-family: inherit; font-size: 12.5px; cursor: pointer;
+  }
+  .export-dropdown button:hover { background: var(--color-bg-panel); }
+
+  /* Batch top toggle in header */
+  .mode-switch {
+    display: inline-flex; align-items: center; gap: 0;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: 999px; padding: 3px;
+  }
+  .mode-switch button {
+    padding: 5px 12px; font-size: 11.5px; font-weight: 600;
+    background: transparent; color: var(--color-text-2);
+    border: none; border-radius: 999px; cursor: pointer;
+    font-family: inherit;
+  }
+  .mode-switch button.active {
+    background: var(--color-accent); color: #0a1628;
+  }
+
+  /* Getting-started tips card */
+  .tip-row {
+    display: flex; gap: 10px; padding: 8px 0;
+    border-bottom: 1px dashed var(--color-border);
+  }
+  .tip-row:last-child { border-bottom: none; }
+  .tip-row .ti { font-size: 18px; flex-shrink: 0; }
+  .tip-row .tt strong { color: var(--color-text-1); font-size: 12.5px; display: block; }
+  .tip-row .tt small { color: var(--color-text-3); font-size: 11.5px; }
+
+  /* Multi-line value styling */
+  .multiline { display: block; }
+
+  /* Footer note styling */
+  .footer-note {
+    background: rgba(245,158,11,0.06);
+    border-left: 3px solid var(--color-warning);
+    padding: 14px 18px;
+    border-radius: 6px;
+    margin-top: 12px;
+  }
+  .footer-note strong { color: var(--color-warning); }
+
+  /* Light-theme fallback (soft) */
+  @media (prefers-color-scheme: light) {
+    :root:not(.dark-locked) {
+      --color-bg-body: #f8fafc;
+      --color-bg-surface: #ffffff;
+      --color-bg-panel: #ffffff;
+      --color-bg-card: #ffffff;
+      --color-bg-elevated: #f1f5f9;
+      --color-border: rgba(15,23,42,0.08);
+      --color-border-strong: rgba(15,23,42,0.16);
+      --color-text-1: #0f172a;
+      --color-text-2: #475569;
+      --color-text-3: #64748b;
+      --color-text-4: #94a3b8;
+    }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     INTRO
+     ═══════════════════════════════════════════════════════════════════ -->
+<h1>UI-4 Mockup <span class="en">OCR Workspace Decluttering</span></h1>
+<p class="subtle" style="margin-top:6px;">
+  Static HTML mockup สำหรับให้ PM + operator รีวิว ก่อนเปิดตั๋ว UI-4b (implementation).
+  ไม่ใช่โค้ดจริง — ใช้ token สีเดียวกับ <code>src/app/globals.css</code> เพื่อให้ feel ใกล้แอปจริง
+</p>
+
+<section class="doc-section" style="margin-top:20px;">
+  <h2>สรุปแนวคิด <span class="en">Concept summary</span></h2>
+  <p class="subtle">Mockup นี้เสนอการ reorganize หน้า OCR โดย <strong style="color:var(--color-text-1)">ไม่ตัดฟีเจอร์ใดออก</strong> — แค่ย้ายเครื่องมือให้ตรงตามลำดับงาน. ให้อ่านทั้ง 3 state ด้านล่างเทียบกับหน้า OCR ปัจจุบันแล้วสังเกตว่า "แต่ละขั้นตอนเห็นเฉพาะเครื่องมือของมัน":</p>
+  <ul>
+    <li><strong>1. จัดเรียงตามลำดับงาน</strong> — Stepper บนหัว: อัปโหลด → เลือกหน้า → ฟิลด์ → รัน → ผล → export. เครื่องมือของ stage อื่นถูกซ่อน/ย่อ (progressive disclosure).</li>
+    <li><strong>2. Progressive disclosure</strong> — Hint drawing, <code>raw_text</code> toggle, batch options อยู่ใน "ตัวเลือกขั้นสูง" ที่ต้องกดเปิด (หรือ hover ที่ chip ของ field แล้วจะเห็น mini-toolbar).</li>
+    <li><strong>3. Two-zone layout</strong> — ซ้ายคือ preview (ขยายพื้นที่), ขวาคือ <strong style="color:var(--color-text-1)">แผงเดียว</strong> ที่ <em>เปลี่ยนเนื้อหาตาม stage</em> — แทนที่จะยัดทุก panel ซ้อนกันเหมือนตอนนี้.</li>
+    <li><strong>4. Result row เดียว ไม่ซ้อน</strong> — corrections badge / confidence / source / rules รวมในบรรทัดเดียวต่อ field, action หายากซ่อนใน overflow menu (⋯) — WRONG, ดูรายละเอียด, retry-เฉพาะ-field.</li>
+    <li><strong>5. คงทุกฟังก์ชัน</strong> — ไม่มีอะไรถูกลบ ทุก action ยังกดถึงได้, ยังคงภาษาไทย + English เหมือนเดิม.</li>
+  </ul>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     STATE 1 — INITIAL UPLOAD
+     ═══════════════════════════════════════════════════════════════════ -->
+<div class="state-banner">
+  <span class="num">1</span>
+  <div>
+    <h2>Initial upload state <span class="en">— Empty workspace, dropzone ครองหน้าจอ</span></h2>
+    <p class="subtle" style="margin-top:2px;">Stage ปัจจุบัน = อัปโหลด. Right panel = getting-started tips.</p>
+  </div>
+</div>
+
+<div class="app">
+  <div class="topbar">
+    <div class="title">OCR Workspace <span class="en">Extract data from documents</span></div>
+    <div class="chips">
+      <span class="mode-switch">
+        <button class="active">ไฟล์เดียว <span class="en">Single</span></button>
+        <button>หลายไฟล์ <span class="en">Batch</span></button>
+      </span>
+      <span class="chip accent">💎 Pro</span>
+      <span class="chip">⚡ 428 credits</span>
+    </div>
+  </div>
+
+  <!-- Stepper -->
+  <div class="stepper">
+    <div class="step current"><span class="dot">1</span> อัปโหลด <span class="en">Upload</span></div>
+    <div class="step-sep">→</div>
+    <div class="step"><span class="dot">2</span> เลือกหน้า <span class="en">Pages</span></div>
+    <div class="step-sep">→</div>
+    <div class="step"><span class="dot">3</span> ฟิลด์ / Template</div>
+    <div class="step-sep">→</div>
+    <div class="step"><span class="dot">4</span> รัน <span class="en">Run</span></div>
+    <div class="step-sep">→</div>
+    <div class="step"><span class="dot">5</span> ผลลัพธ์ <span class="en">Results</span></div>
+    <div class="step-sep">→</div>
+    <div class="step"><span class="dot">6</span> ส่งออก <span class="en">Export</span></div>
+  </div>
+
+  <div class="zones">
+    <!-- Left: dropzone -->
+    <div class="zone-left">
+      <div class="dropzone">
+        <div class="glyph">📄</div>
+        <h3>วาง / คลิกเพื่ออัปโหลด</h3>
+        <p>รองรับ PDF, รูปภาพ, Word (.docx), Excel (.xlsx/.xls) • สูงสุด 20MB</p>
+        <div class="actions">
+          <button class="btn btn-primary btn-lg">เลือกไฟล์ <span class="en">Browse</span></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: getting-started tips -->
+    <div class="zone-right">
+      <div class="panel-title"><span class="stage-num">1</span> Getting started <span class="en">เริ่มใช้งาน</span></div>
+
+      <div class="card">
+        <h4>โหมดการใช้งาน <span class="en">Modes</span></h4>
+        <div class="tip-row">
+          <span class="ti">📄</span>
+          <div class="tt">
+            <strong>Single — ไฟล์เดียว</strong>
+            <small>อัปโหลดเอกสาร 1 ไฟล์, ปรับ hint ได้แม่นยำ, เหมาะกับงานที่ต้องตรวจทีละใบ</small>
+          </div>
+        </div>
+        <div class="tip-row">
+          <span class="ti">📚</span>
+          <div class="tt">
+            <strong>Batch — หลายไฟล์</strong>
+            <small>อัปโหลดพร้อมกันสูงสุด 20 ไฟล์ ใช้ template เดียวกัน — ต้องเลือก template ก่อนเริ่ม</small>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h4>ไฟล์ที่รองรับ <span class="en">Supported</span></h4>
+        <div class="tip-row">
+          <span class="ti">✅</span>
+          <div class="tt">
+            <strong>PDF, JPG, PNG, DOCX, XLSX</strong>
+            <small>สูงสุด 20MB ต่อไฟล์ • PDF สูงสุด 10 หน้า/ไฟล์ (เลือกได้ในขั้น "เลือกหน้า")</small>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h4>สิ่งที่ระบบจะทำ <span class="en">What happens</span></h4>
+        <ul class="checklist">
+          <li>อัปโหลดและแปลง PDF เป็นภาพ</li>
+          <li>ให้คุณเลือกหน้าและ template</li>
+          <li>เรียก AI สกัดตามฟิลด์ที่กำหนด</li>
+          <li>แสดงผลพร้อม confidence และ export ได้</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     STATE 2 — MULTI-PAGE + FIELDS CONFIGURED (RUN STAGE)
+     ═══════════════════════════════════════════════════════════════════ -->
+<div class="state-banner">
+  <span class="num">2</span>
+  <div>
+    <h2>Multi-page + fields configured <span class="en">— Ready to run</span></h2>
+    <p class="subtle" style="margin-top:2px;">PDF 3 หน้า, ฟิลด์ตั้งไว้แล้ว, stage ปัจจุบัน = "รัน". Field chip แสดง <strong style="color:var(--color-text-1)">hover state</strong> เผยเครื่องมือ hint + raw_text.</p>
+  </div>
+</div>
+
+<div class="app">
+  <div class="topbar">
+    <div class="title">OCR Workspace</div>
+    <div class="chips">
+      <span class="mode-switch">
+        <button class="active">ไฟล์เดียว</button>
+        <button>หลายไฟล์</button>
+      </span>
+      <span class="chip accent">💎 Pro</span>
+      <span class="chip">⚡ 428 credits</span>
+    </div>
+  </div>
+
+  <div class="stepper">
+    <div class="step done"><span class="dot">✓</span> อัปโหลด</div>
+    <div class="step-sep">→</div>
+    <div class="step done"><span class="dot">✓</span> เลือกหน้า <span class="en">2/3</span></div>
+    <div class="step-sep">→</div>
+    <div class="step done"><span class="dot">✓</span> ฟิลด์ <span class="en">5 fields</span></div>
+    <div class="step-sep">→</div>
+    <div class="step current"><span class="dot">4</span> รัน <span class="en">Run</span></div>
+    <div class="step-sep">→</div>
+    <div class="step"><span class="dot">5</span> ผลลัพธ์</div>
+    <div class="step-sep">→</div>
+    <div class="step"><span class="dot">6</span> ส่งออก</div>
+  </div>
+
+  <div class="zones">
+    <!-- Left: preview with page picker below -->
+    <div class="zone-left">
+      <div class="preview-frame">
+        <div class="preview-toolbar">
+          <div class="preview-toolbar-left">
+            <button class="icon-btn" title="ซูมออก">−</button>
+            <button class="icon-btn" title="ซูมเข้า">+</button>
+            <button class="icon-btn" title="รีเซ็ตซูม">⟳</button>
+          </div>
+          <div class="preview-toolbar-left">
+            <span class="chip" style="font-size:11px;">หน้า 1 / 3</span>
+            <button class="icon-btn" title="ขยายเต็มจอ">⛶</button>
+          </div>
+        </div>
+
+        <div class="doc-page">
+          <div class="form-title">ใบจ่ายวัสดุ</div>
+          <div class="form-row"><span class="lbl">เลขที่ใบจ่าย:</span><span class="val">MT-6807-0142</span></div>
+          <div class="form-row"><span class="lbl">วันที่จ่าย:</span><span class="val">6 กรกฎาคม 2568</span></div>
+          <div class="form-row" style="position:relative;">
+            <span class="lbl">ผู้รับโอน:</span>
+            <span class="val">คุณสมชาย เจริญกิจ / แผนกผลิต 3</span>
+            <!-- hint pin overlay -->
+            <div class="hint-pin" data-label="📍 ผู้รับโอน"
+                 style="left: 76px; right: 8px; top: -4px; height: 26px;"></div>
+          </div>
+          <div class="form-row"><span class="lbl">ผู้โอน:</span><span class="val">คุณวราภรณ์ (คลังกลาง)</span></div>
+          <table class="mock-table">
+            <thead><tr><th>รายการ</th><th>จำนวน</th><th>หน่วย</th></tr></thead>
+            <tbody>
+              <tr><td>วัตถุดิบ A-401</td><td>120</td><td>กก.</td></tr>
+              <tr><td>วัตถุดิบและงานระหว่างทำ</td><td>45</td><td>กก.</td></tr>
+              <tr><td>บรรจุภัณฑ์ B-12</td><td>200</td><td>ชิ้น</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="scan-hint"></div>
+      </div>
+
+      <!-- Page picker BELOW preview (as per UI-1) -->
+      <div class="page-picker">
+        <div class="page-picker-header">
+          <span class="lbl">เลือกหน้าที่จะสกัด <span class="en">Selected 2/3</span></span>
+          <div class="actions">
+            <button class="mini-btn">เลือกทั้งหมด</button>
+            <button class="mini-btn">ล้างการเลือก</button>
+            <button class="mini-btn">ย่อ ▴</button>
+          </div>
+        </div>
+        <div class="thumbs">
+          <div class="thumb selected" data-page="1">หน้า 1</div>
+          <div class="thumb selected" data-page="2">หน้า 2</div>
+          <div class="thumb" data-page="3">หน้า 3</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: RUN stage -->
+    <div class="zone-right">
+      <div class="panel-title"><span class="stage-num">4</span> รัน <span class="en">Run</span></div>
+
+      <!-- Template + fields summary (locked from prev stage) -->
+      <div class="card">
+        <h4>Template &amp; ฟิลด์
+          <button class="mini-btn" style="font-size:11px;">← แก้ไข</button>
+        </h4>
+        <div class="template-pill">
+          <div class="icon">📄</div>
+          <div>
+            <div class="name">ใบจ่ายวัสดุ (Standard)</div>
+            <div class="sub">Template · 5 fields · 2 pages</div>
+          </div>
+        </div>
+        <div class="field-chip-row">
+          <span class="field-chip">เลขที่ใบจ่ายวัสดุ</span>
+          <!-- HOVERED chip with mini toolbar reveal -->
+          <span class="field-chip has-hint is-hovered">
+            ผู้รับโอน
+            <span class="x">×</span>
+            <span class="hover-tools">
+              <button title="วาดตำแหน่ง hint">📍 วาด hint</button>
+              <button title="เปลี่ยนเป็น raw_text">● raw_text</button>
+              <button title="เปลี่ยนชื่อ">✎ rename</button>
+            </span>
+          </span>
+          <span class="field-chip">วันที่จ่าย</span>
+          <span class="field-chip">ผู้โอน</span>
+          <span class="field-chip raw" title="raw_text type">รายการทั้งหมด</span>
+        </div>
+        <p class="subtle" style="margin-top:10px; font-size:11.5px;">
+          <strong style="color:var(--color-text-2);">💡 Hint:</strong> hover ที่ chip เพื่อดู mini-toolbar (วาด hint, raw_text, rename)
+        </p>
+      </div>
+
+      <!-- Credit estimate -->
+      <div class="credit-estimate">
+        <div style="font-size:22px;">⚡</div>
+        <div>
+          <div class="cost">10 credits <small>ค่าประมาณ · 5 fields × 2 pages</small></div>
+        </div>
+      </div>
+
+      <!-- What will happen -->
+      <div class="card" style="margin-top:12px;">
+        <h4>จะทำอะไรบ้าง <span class="en">Checklist</span></h4>
+        <ul class="checklist">
+          <li>เตรียมส่ง AI <span class="en">Prepare</span></li>
+          <li>อ่านตัวอักษร <span class="en">Read</span></li>
+          <li>จับ field ตามคำสั่ง <span class="en">Extract</span></li>
+          <li>จัดรูปแบบผลลัพธ์ <span class="en">Format</span></li>
+        </ul>
+      </div>
+
+      <button class="btn btn-primary btn-lg btn-full" style="margin-top:10px;">
+        ▶ สกัดข้อมูล <span class="en">Extract</span>
+      </button>
+
+      <!-- Advanced expander (CLOSED here to show that it's collapsed at run stage) -->
+      <div class="expander">
+        <div class="expander-head">ตัวเลือกขั้นสูง <span class="en">Advanced options</span></div>
+        <div class="expander-body">
+          <div class="expander-row">
+            <div><span class="rlbl">Batch mode</span><div class="rsub">รันหลายไฟล์พร้อมกัน</div></div>
+            <div class="toggle"></div>
+          </div>
+          <div class="expander-row">
+            <div><span class="rlbl">Hint drawing</span><div class="rsub">วาดกรอบบน preview เพื่อ hint ตำแหน่ง</div></div>
+            <div class="toggle on"></div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- Note: also show what the FIELDS stage right-panel looks like (before Run),
+     with expander OPEN so reviewer sees advanced options -->
+<div class="state-banner" style="background: rgba(99,102,241,0.08); border-color: rgba(99,102,241,0.3);">
+  <span class="num" style="background: var(--color-ocr);">2b</span>
+  <div>
+    <h2>Sub-state: Fields stage — advanced expander OPEN <span class="en">for reference</span></h2>
+    <p class="subtle" style="margin-top:2px;">แสดงเฉพาะ right panel ตอน stage = "ฟิลด์" ให้เห็น advanced options ที่ซ่อนอยู่.</p>
+  </div>
+</div>
+
+<div class="app" style="max-width: 440px; margin: 0 auto;">
+  <div class="zone-right" style="border-radius: 20px;">
+    <div class="panel-title"><span class="stage-num" style="background: var(--color-ocr); color:white;">3</span> ตั้งค่าฟิลด์ <span class="en">Fields / Template</span></div>
+
+    <div class="card">
+      <h4>Template</h4>
+      <div class="template-pill">
+        <div class="icon">📄</div>
+        <div>
+          <div class="name">ใบจ่ายวัสดุ (Standard)</div>
+          <div class="sub">5 fields · แก้ไขได้</div>
+        </div>
+        <button class="switch-btn">เปลี่ยน</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h4>ฟิลด์ที่ต้องการสกัด
+        <span class="chip" style="font-size:10.5px;">5 fields</span>
+      </h4>
+      <div class="field-chip-row">
+        <span class="field-chip">เลขที่ใบจ่ายวัสดุ <span class="x">×</span></span>
+        <span class="field-chip has-hint">ผู้รับโอน <span class="x">×</span></span>
+        <span class="field-chip">วันที่จ่าย <span class="x">×</span></span>
+        <span class="field-chip">ผู้โอน <span class="x">×</span></span>
+        <span class="field-chip raw">รายการทั้งหมด <span class="x">×</span></span>
+      </div>
+      <div class="field-input-row">
+        <input type="text" placeholder="ชื่อ field..." />
+        <button class="btn btn-ghost">+ เพิ่ม</button>
+      </div>
+
+      <div class="expander open">
+        <div class="expander-head">ตัวเลือกขั้นสูง <span class="en">Advanced options</span></div>
+        <div class="expander-body">
+          <div class="expander-row">
+            <div><span class="rlbl">Batch mode <span class="en">หลายไฟล์</span></span>
+              <div class="rsub">รันไฟล์หลายๆ ตัวด้วย template นี้</div></div>
+            <div class="toggle"></div>
+          </div>
+          <div class="expander-row">
+            <div><span class="rlbl">Hint drawing <span class="en">วาดตำแหน่ง</span></span>
+              <div class="rsub">เปิดเพื่อวาดกรอบสีแดงบน preview</div></div>
+            <div class="toggle on"></div>
+          </div>
+          <div class="expander-row">
+            <div><span class="rlbl">Field type <span class="en">ประเภท</span></span>
+              <div class="rsub">value ปกติ vs raw_text (คงบรรทัด)</div></div>
+            <select class="mini-select">
+              <option>value (default)</option>
+              <option>raw_text</option>
+            </select>
+          </div>
+          <div class="expander-row">
+            <div><span class="rlbl">บันทึกทับ Template</span>
+              <div class="rsub">อัปเดต template ปัจจุบันด้วย fields ที่แก้</div></div>
+            <button class="mini-btn">บันทึก</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <button class="btn btn-primary btn-full">ถัดไป: รัน <span class="en">Next: Run</span> →</button>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     STATE 3 — RESULTS
+     ═══════════════════════════════════════════════════════════════════ -->
+<div class="state-banner">
+  <span class="num">3</span>
+  <div>
+    <h2>Results state <span class="en">— Extracted data + review</span></h2>
+    <p class="subtle" style="margin-top:2px;">7 fields, mix ของ verbatim / multi-line / corrections / low-confidence / rules. Overflow menu (⋯) เปิดอยู่ที่ row ผู้รับโอน.</p>
+  </div>
+</div>
+
+<div class="app">
+  <div class="topbar">
+    <div class="title">OCR Workspace <span class="en">— ผลลัพธ์</span></div>
+    <div class="chips">
+      <span class="mode-switch">
+        <button class="active">ไฟล์เดียว</button>
+        <button>หลายไฟล์</button>
+      </span>
+      <span class="chip accent">💎 Pro</span>
+      <span class="chip">⚡ 418 credits</span>
+    </div>
+  </div>
+
+  <div class="stepper">
+    <div class="step done"><span class="dot">✓</span> อัปโหลด</div>
+    <div class="step-sep">→</div>
+    <div class="step done"><span class="dot">✓</span> เลือกหน้า</div>
+    <div class="step-sep">→</div>
+    <div class="step done"><span class="dot">✓</span> ฟิลด์</div>
+    <div class="step-sep">→</div>
+    <div class="step done"><span class="dot">✓</span> รัน</div>
+    <div class="step-sep">→</div>
+    <div class="step current"><span class="dot">5</span> ผลลัพธ์ <span class="en">Results</span></div>
+    <div class="step-sep">→</div>
+    <div class="step"><span class="dot">6</span> ส่งออก</div>
+  </div>
+
+  <div class="zones">
+    <!-- Left: preview -->
+    <div class="zone-left">
+      <div class="preview-frame">
+        <div class="preview-toolbar">
+          <div class="preview-toolbar-left">
+            <button class="icon-btn">−</button>
+            <button class="icon-btn">+</button>
+            <button class="icon-btn">⟳</button>
+          </div>
+          <div class="preview-toolbar-left">
+            <span class="chip" style="font-size:11px;">หน้า 1 / 2</span>
+            <button class="icon-btn">⛶</button>
+          </div>
+        </div>
+
+        <div class="doc-page">
+          <div class="form-title">ใบจ่ายวัสดุ</div>
+          <div class="form-row"><span class="lbl">เลขที่ใบจ่าย:</span><span class="val">MT-6807-0142</span></div>
+          <div class="form-row"><span class="lbl">วันที่จ่าย:</span><span class="val">6 กรกฎาคม 2568</span></div>
+          <div class="form-row"><span class="lbl">ผู้รับโอน:</span><span class="val">คุณสมชาย เจริญกิจ / แผนกผลิต 3</span></div>
+          <div class="form-row"><span class="lbl">ผู้โอน:</span><span class="val">คุณวราภรณ์ (คลังกลาง)</span></div>
+          <table class="mock-table">
+            <thead><tr><th>รายการ</th><th>จำนวน</th><th>หน่วย</th></tr></thead>
+            <tbody>
+              <tr><td>วัตถุดิบ A-401</td><td>120</td><td>กก.</td></tr>
+              <tr><td>วัตถุดิบและงานระหว่างทำ</td><td>45</td><td>กก.</td></tr>
+              <tr><td>บรรจุภัณฑ์ B-12</td><td>200</td><td>ชิ้น</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="page-picker">
+        <div class="page-picker-header">
+          <span class="lbl">หน้าที่สกัด: 2/3</span>
+          <div class="actions">
+            <button class="mini-btn">← เอกสารใหม่</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: results table -->
+    <div class="zone-right">
+      <div class="result-header">
+        <div class="panel-title" style="margin: 0;"><span class="stage-num">5</span> ผลการสกัด <span class="en">Results</span></div>
+        <div class="actions">
+          <button class="btn btn-ghost" style="padding: 8px 12px; font-size: 12px;">⟳ รันใหม่ทั้งหมด</button>
+          <div style="position: relative;">
+            <button class="btn btn-primary" style="padding: 8px 14px; font-size: 12.5px;">ส่งออก ▾</button>
+            <!-- export dropdown OPEN -->
+            <div class="export-dropdown">
+              <button>📊 Export Excel <span class="om-en">.xlsx</span></button>
+              <button>📄 Export CSV <span class="om-en">.csv</span></button>
+              <button>💾 บันทึกภาพ + ผลลัพธ์</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="display:flex; gap:6px; margin-bottom:12px; font-size: 11.5px;">
+        <span class="chip" style="background: rgba(16,185,129,0.15); color:#34d399; border-color: rgba(16,185,129,0.3);">✓ สำเร็จ 7 fields</span>
+        <span class="chip" style="background: rgba(245,158,11,0.15); color:#fbbf24; border-color: rgba(245,158,11,0.3);">⚠ ต่ำ 1 field</span>
+      </div>
+
+      <div class="result-table">
+
+        <!-- Row 1: verbatim, high conf -->
+        <div class="result-row">
+          <div class="fname">เลขที่ใบจ่ายวัสดุ</div>
+          <div class="fval">MT-6807-0142</div>
+          <div class="meta-row">
+            <span class="conf-chip conf-hi">98%</span>
+            <span class="badge-src mini-badge">📍 hint</span>
+          </div>
+          <button class="overflow-btn">⋯</button>
+        </div>
+
+        <!-- Row 2: multi-line, high conf -->
+        <div class="result-row">
+          <div class="fname">ที่อยู่ผู้รับ</div>
+          <div class="fval multiline">99/8 ถ.พหลโยธิน แขวงสามเสนใน
+เขตพญาไท กรุงเทพฯ 10400</div>
+          <div class="meta-row">
+            <span class="conf-chip conf-hi">92%</span>
+            <span class="badge-raw mini-badge">● raw_text</span>
+          </div>
+          <button class="overflow-btn">⋯</button>
+        </div>
+
+        <!-- Row 3: WITH corrections badge + overflow menu OPEN -->
+        <div class="result-row" style="border-color: var(--color-accent-border); background: var(--color-accent-dim);">
+          <div class="fname">ผู้รับโอน <span class="en" style="margin-left:0;">(recipient)</span></div>
+          <div class="fval">คุณสมชาย เจริญกิจ / แผนกผลิต 3</div>
+          <div class="meta-row">
+            <span class="conf-chip conf-hi">88%</span>
+            <span class="mini-badge badge-corr" title="AI แก้คำผิด 1 จุด">✎ corr · Plastelet→Platelet</span>
+            <span class="badge-src mini-badge">📍 hint</span>
+          </div>
+          <button class="overflow-btn">⋯</button>
+          <!-- OPEN overflow menu -->
+          <div class="overflow-menu">
+            <button>⚠ แจ้งว่าผิด <span class="om-en">Report wrong</span></button>
+            <button>🔍 ดูรายละเอียด <span class="om-en">corrections / rules / source</span></button>
+            <button>⟳ รันเฉพาะฟิลด์นี้ใหม่ <span class="om-en">Retry field</span></button>
+            <hr />
+            <button>📋 คัดลอกค่า <span class="om-en">Copy value</span></button>
+          </div>
+        </div>
+
+        <!-- Row 4: rules badge -->
+        <div class="result-row">
+          <div class="fname">วันที่จ่าย</div>
+          <div class="fval">2568-07-06</div>
+          <div class="meta-row">
+            <span class="conf-chip conf-hi">95%</span>
+            <span class="mini-badge badge-rule">💡 RULE · date-normalize</span>
+          </div>
+          <button class="overflow-btn">⋯</button>
+        </div>
+
+        <!-- Row 5: low confidence -->
+        <div class="result-row">
+          <div class="fname">ผู้โอน</div>
+          <div class="fval" style="color: var(--color-text-2);">คุณ วราภรน์ (คลังกลาง?)</div>
+          <div class="meta-row">
+            <span class="conf-chip conf-lo">54%</span>
+            <span class="badge-src mini-badge">🤖 AI</span>
+          </div>
+          <button class="overflow-btn">⋯</button>
+        </div>
+
+        <!-- Row 6: mid-confidence, table row aggregation -->
+        <div class="result-row">
+          <div class="fname">จำนวนรายการ</div>
+          <div class="fval">3 รายการ</div>
+          <div class="meta-row">
+            <span class="conf-chip conf-md">76%</span>
+            <span class="badge-src mini-badge">🤖 AI</span>
+          </div>
+          <button class="overflow-btn">⋯</button>
+        </div>
+
+        <!-- Row 7: raw_text multi-line -->
+        <div class="result-row">
+          <div class="fname">รายการทั้งหมด <span class="en" style="margin-left:0;">(items · raw_text)</span></div>
+          <div class="fval multiline">วัตถุดิบ A-401 · 120 กก.
+วัตถุดิบและงานระหว่างทำ · 45 กก.
+บรรจุภัณฑ์ B-12 · 200 ชิ้น</div>
+          <div class="meta-row">
+            <span class="conf-chip conf-md">81%</span>
+            <span class="badge-raw mini-badge">● raw_text</span>
+          </div>
+          <button class="overflow-btn">⋯</button>
+        </div>
+
+      </div>
+
+      <p class="subtle" style="margin-top: 14px; font-size: 11.5px; text-align:center;">
+        กด <code>⋯</code> ที่แต่ละแถวเพื่อแจ้งว่าผิด · ดูรายละเอียด · retry เฉพาะ field
+      </p>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     IMPLEMENTATION NOTES
+     ═══════════════════════════════════════════════════════════════════ -->
+<section class="doc-section" style="margin-top:40px;">
+  <h2>หมายเหตุการ implement <span class="en">Implementation notes for UI-4b</span></h2>
+  <p class="subtle">รายการที่ implementer ควรอ่านก่อนเริ่มแตะโค้ด — บาง item ดูเหมือนย้ายกล่อง แต่จริงๆ ผูกกับ state / coordinate math ที่ซับซ้อน.</p>
+
+  <div class="footer-note">
+    <strong>⚠️ Hint drawing overlay ไม่ trivial</strong>
+    <p style="color: var(--color-text-2); margin-top: 4px;">
+      OCR-6c เพิ่งแก้ coordinate drift บนหน้า landscape (iframe letterbox). ถ้าจะย้าย overlay ไปอยู่ใน "advanced expander" หรือให้เปิดจาก hover chip — ต้องระวังว่า overlay ผูกกับ preview element ตัวเดียวกันเสมอ ห้าม remount overlay ระหว่างสลับ stage (จะทำให้ hint pin หลุดตำแหน่ง). แนะนำ: overlay อยู่ใน DOM ตลอดเวลา แค่ toggle <code>pointer-events</code> / opacity.
+    </p>
+  </div>
+
+  <div class="footer-note" style="border-color: var(--color-info); background: rgba(59,130,246,0.06);">
+    <strong style="color: var(--color-info);">🔀 Batch mode = top-level toggle, ไม่ใช่ stage</strong>
+    <p style="color: var(--color-text-2); margin-top: 4px;">
+      Mockup วาง Batch เป็น mode switch ที่ topbar (ไฟล์เดียว / หลายไฟล์). สลับ mode = เปลี่ยนโครง zone ทั้งหมด: preview ซ้ายกลายเป็น file list, right panel = template + fields summary + run-all. Stepper ต้องเปลี่ยนคำ (เลือกหน้า → เลือกไฟล์). Implementer ตัดสินใจว่าจะ share right-panel components หรือ fork.
+    </p>
+  </div>
+
+  <div class="footer-note" style="border-color: var(--color-danger); background: rgba(239,68,68,0.06);">
+    <strong style="color: var(--color-danger);">⛔ Error states ทำอย่างไรใน stepper?</strong>
+    <p style="color: var(--color-text-2); margin-top: 4px;">
+      Mockup ไม่ได้แสดง error state. แนะนำ: (1) error ตอน upload = stepper 1 กลายเป็นสีแดง + right panel แสดง friendlyError (UI-3) + CTA "ลองใหม่", ไม่ auto-advance stage. (2) error ตอน run = ค้างที่ stage 4, right panel แสดง error + "Retry" (UI-2). (3) partial success (บาง field null) = ไปที่ stage 5 ปกติ, chip เหลืองว่ามีปัญหา.
+    </p>
+  </div>
+
+  <div class="footer-note" style="border-color: var(--color-warning);">
+    <strong>🚦 Migration: default view จะเปลี่ยนทันทีหรือหลัง flag?</strong>
+    <p style="color: var(--color-text-2); margin-top: 4px;">
+      Operator เดิมชินกับ layout เก่า (panels ซ้อน). แนะนำ flag <code>featureFlags.ocrWorkspaceV2</code> เริ่มปิดใน prod, PM/operator เปิดใน preview ก่อน validate; หลัง feedback รอบ 1 ค่อยเปิดใน prod. ห้ามลบ code เดิมทันที — ต้อง fallback ได้.
+    </p>
+  </div>
+
+  <div class="footer-note" style="border-color: var(--color-text-3); background: rgba(148,163,184,0.06);">
+    <strong>📐 State management ต้องเพิ่ม currentStage</strong>
+    <p style="color: var(--color-text-2); margin-top: 4px;">
+      <code>OCRWorkspace.tsx</code> ตอนนี้ไม่มี concept ของ stage — ทุก panel render พร้อมกัน. UI-4b จะต้องเพิ่ม <code>currentStage: 'upload' | 'pages' | 'fields' | 'run' | 'results'</code> ใน state, กำหนดกฎ auto-advance (upload success → pages, extract success → results) และให้ user คลิก stepper กระโดดถอยหลังได้ (แต่ไม่ควรกระโดดข้ามไปข้างหน้าถ้า stage ก่อนหน้าไม่ครบ).
+    </p>
+  </div>
+
+  <div class="footer-note" style="border-color: var(--color-rule); background: rgba(168,85,247,0.06);">
+    <strong style="color: var(--color-rule);">💡 Rules badge ยังไม่มี backend</strong>
+    <p style="color: var(--color-text-2); margin-top: 4px;">
+      Mockup แสดง <code>💡 RULE · date-normalize</code> เพื่อ preview OCR-Rulebase feature. Feature นี้ยัง <em>ไม่ implemented</em> (ดู <code>docs/RULEBASE_LEARNING_LOOP_PLAN.md</code>). Implementer UI-4b <strong>ไม่ต้อง</strong> ทำ badge นี้ให้ live — แค่เผื่อพื้นที่ใน result-row meta-row ไว้ให้ badge ในอนาคต.
+    </p>
+  </div>
+
+  <div class="footer-note" style="border-color: var(--color-text-3); background: rgba(148,163,184,0.06);">
+    <strong>🔤 ทุก string ผ่าน i18n</strong>
+    <p style="color: var(--color-text-2); margin-top: 4px;">
+      Mockup ใช้ string ไทยที่พบใน <code>src/lib/i18n/locales/th.ts</code> เป็นหลัก (extractCta, uploadHeadline, pagePicker.*, batch*). String ใหม่ที่ต้องเพิ่ม: stepper labels (6 stage), overflow menu items (แจ้งว่าผิด/ดูรายละเอียด/รันเฉพาะฟิลด์นี้ใหม่), "ตัวเลือกขั้นสูง". English labels ต้องคู่กันทั้งหมด — ห้าม hard-code.
+    </p>
+  </div>
+</section>
+
+</div>
+</body>
+</html>

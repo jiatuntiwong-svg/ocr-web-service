@@ -26,6 +26,7 @@ export const ErrorCode = {
     RATE_LIMITED: "RATE_LIMITED",
     FILE_TOO_LARGE: "FILE_TOO_LARGE",
     INVALID_FORMAT: "INVALID_FORMAT",
+    TOO_MANY_PAGES: "TOO_MANY_PAGES",
 
     // ── Domain ──
     AI_FAILED: "AI_FAILED",
@@ -59,6 +60,7 @@ export const STATUS_FOR_CODE: Partial<Record<ErrorCodeT, number>> = {
     RATE_LIMITED: 429,
     FILE_TOO_LARGE: 413,
     INVALID_FORMAT: 400,
+    TOO_MANY_PAGES: 400,
     AI_FAILED: 502,
     AI_UNAVAILABLE: 503,
     UPLOAD_FAILED: 500,

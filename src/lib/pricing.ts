@@ -18,6 +18,25 @@
 
 export type Operation = "ocr" | "compare";
 
+/**
+ * Credit-charging strategy for OCR (BILL-1, 2026-07-08).
+ *   - "per_page"       — 1 credit per selected PDF page (single image = 1). Default.
+ *   - "field_formula"  — legacy multiplicative formula. Kept as reserve.
+ *   - "per_file"       — flat 1 credit per file, regardless of pages/fields.
+ * Compare pricing is intentionally NOT model-switchable — Compare always uses
+ * the field-formula path (decision deferred to a future task).
+ */
+export type CreditModel = "per_page" | "field_formula" | "per_file";
+export const CREDIT_MODELS: CreditModel[] = ["per_page", "field_formula", "per_file"];
+export const DEFAULT_CREDIT_MODEL: CreditModel = "per_page";
+
+/** Coerce arbitrary input to a valid CreditModel (falls back to default). */
+export function sanitizeCreditModel(v: unknown): CreditModel {
+    return typeof v === "string" && (CREDIT_MODELS as string[]).includes(v)
+        ? (v as CreditModel)
+        : DEFAULT_CREDIT_MODEL;
+}
+
 export interface PricingInput {
     operation: Operation;
     /** Number of extraction fields the user selected. */
@@ -26,6 +45,21 @@ export interface PricingInput {
     numDocs?: number;
     /** Multiplier applied per AI model/tier. Default 1.0. */
     modelMult?: number;
+    /**
+     * BILL-1 (per_page model): number of PDF pages actually processed for this
+     * run. Comes from the API-1 `pages` selection (or `total_pages` when no
+     * subset was picked); single images / docx count as 1. Ignored by other
+     * models. Defaults to 1 when omitted so single-file uploads keep working
+     * without the caller having to plumb page counts everywhere.
+     */
+    pages?: number;
+    /**
+     * BILL-1: OCR-only. Which charging formula to apply. Omit / undefined =
+     * `"field_formula"` so pre-BILL-1 callers keep the exact legacy behavior.
+     * Server code must load the active model via `getActiveCreditModel(env)`
+     * and pass it explicitly.
+     */
+    creditModel?: CreditModel;
 }
 
 export interface PricingActualInput extends PricingInput {
@@ -77,6 +111,38 @@ export function estimateCredits(input: PricingInput): CreditBreakdown {
     const fF = fieldFactor(input.fields);
 
     if (input.operation === "ocr") {
+        // BILL-1 dispatch — OCR only. Compare stays byte-identical below.
+        // Undefined creditModel keeps the pre-BILL-1 legacy formula so
+        // untouched callers (Compare, older paths) don't regress.
+        const model: CreditModel = input.creditModel ?? "field_formula";
+        const pages = Math.max(1, Math.floor(input.pages ?? 1));
+
+        if (model === "per_page") {
+            const credits = Math.max(OCR_MIN, pages);
+            return {
+                credits,
+                steps: [
+                    { label: "Pages",         value: String(pages) },
+                    { label: "× 1 credit",    value: "× 1" },
+                    { label: "Total",         value: String(credits) },
+                ],
+                factors: { ocrFactor: 1, numDocs: pages, compareOverhead: 1, tableRowFactor: 1, modelMult: 1 },
+            };
+        }
+
+        if (model === "per_file") {
+            const credits = OCR_MIN; // exactly 1
+            return {
+                credits,
+                steps: [
+                    { label: "Per file",      value: "1 credit" },
+                    { label: "Total",         value: String(credits) },
+                ],
+                factors: { ocrFactor: 1, numDocs: 1, compareOverhead: 1, tableRowFactor: 1, modelMult: 1 },
+            };
+        }
+
+        // field_formula (legacy) — MUST stay byte-identical to pre-BILL-1.
         const raw = fF * mult;
         const credits = Math.max(OCR_MIN, Math.ceil(raw));
         return {
@@ -151,6 +217,32 @@ export function actualCredits(input: PricingActualInput): CreditBreakdown {
  *   6–9 → orange  "high"
  *   ≥10 → red     "very high"
  */
+/**
+ * BILL-1: read the active OCR credit model from `system_settings`
+ * (key = `CREDIT_MODEL`). Falls back to `DEFAULT_CREDIT_MODEL` on any
+ * error / missing binding — never throws. Cheap enough to call per
+ * request (single indexed lookup); if that ever shows up in the hot
+ * path, add a short-TTL cache here — do NOT hardcode.
+ */
+export async function getActiveCreditModel(env: any): Promise<CreditModel> {
+    try {
+        if (!env?.DB) return DEFAULT_CREDIT_MODEL;
+        await env.DB.prepare(
+            `CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)`
+        ).run();
+        const row: any = await env.DB.prepare(
+            "SELECT value FROM system_settings WHERE key = 'CREDIT_MODEL'"
+        ).first();
+        if (!row) return DEFAULT_CREDIT_MODEL;
+        // Value is stored as a JSON string (matches TIER_CREDITS convention).
+        let raw: unknown = row.value;
+        try { raw = JSON.parse(row.value); } catch { /* legacy plain string */ }
+        return sanitizeCreditModel(raw);
+    } catch {
+        return DEFAULT_CREDIT_MODEL;
+    }
+}
+
 export function creditTone(credits: number): "green" | "amber" | "orange" | "red" {
     if (credits <= 3) return "green";
     if (credits <= 5) return "amber";

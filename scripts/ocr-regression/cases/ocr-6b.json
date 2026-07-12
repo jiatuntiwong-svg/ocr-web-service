@@ -1,0 +1,31 @@
+{
+  "suite": "OCR-6b",
+  "description": "Landscape page 1 + sibling-label attention blend. Regression from ใบโอนย้ายสินทรัพย์ถาวร form (TR07246900009). See test_fixtures/regression/landscape-sibling-labels/CASE.md. Fixture PDF is NOT committed (PII decision pending) — case will be skipped until the file exists at the expected path.",
+  "defaults": {
+    "templateName": "${OCR_E2E_LANDSCAPE_TEMPLATE}",
+    "runs": 3
+  },
+  "cases": [
+    {
+      "id": "landscape-sibling-labels",
+      "description": "Field ชื่อและรหัสศูนย์รับผิดชอบ has 3 lines. Whole-image extraction pre-OCR-6b returned a blend of a sibling field's value with line 3 dropped + silent autocorrect. Crop pass must deliver all 3 lines verbatim.",
+      "file": "test_fixtures/regression/landscape-sibling-labels/source.pdf",
+      "targetField": "ชื่อและรหัสศูนย์รับผิดชอบ",
+      "assertion": "multiline",
+      "expect": {
+        "lines": [
+          "3 6",
+          "ศูนย์รับบริจาคโลหิตและพลาสมา",
+          "สถานีกาชาดที่11 วิเศษนิยม บางแค"
+        ],
+        "mustNotContain": ["ศูนย์บริการโลหิตและพลาสมา", "ศูนย์บริการโลหิตแห่งชาติ"],
+        "provenanceExpected": "crop"
+      }
+    }
+  ],
+  "notes": {
+    "fixture_status": "Source PDF not committed — see CASE.md for the PII decision. Harness must skip (not fail) when file is absent.",
+    "template_setup": "Template OCR_E2E_LANDSCAPE_TEMPLATE must have a bbox_hint on ชื่อและรหัสศูนย์รับผิดชอบ (that is the code path under test).",
+    "verify_provenance": "After the merged raw_json is available, assert the target field carries `source: \"crop\"`. Both `crop_miss: true` and `crop_no_match: true` are regressions of the OCR-6b observability guarantee even if the value looks right — indicates the crop merge didn't fire."
+  }
+}

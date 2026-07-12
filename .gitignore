@@ -72,3 +72,14 @@ design_handoff_docroom_redesign/
 test_compare/
 scripts/poc-doc-extraction/samples/
 scripts/poc-excel-extraction/samples/
+# test_fixtures: keep local by default, but allow OCR-2 regression sources
+# (synthetic HTML + README — no PII) to be committed.
+test_fixtures/*
+!test_fixtures/regression/
+test_fixtures/regression/generated/
+# S2-1: category-scoped generated PDFs (regeneration is deterministic from committed HTML)
+test_fixtures/regression/*/generated/
+# S2-1: real (uncommitted) landscape fixture per OCR-6b PII decision — CASE.md is committed
+test_fixtures/regression/landscape/landscape-sibling-labels/source.pdf
+pm/reports/test-1-runs/
+pm/reports/OCR-2-runs/

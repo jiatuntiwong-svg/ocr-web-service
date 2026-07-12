@@ -2,8 +2,20 @@
 
 > สถานะ: **บันทึกไว้รอตัดสินใจ** — ยังไม่เริ่ม implement
 > วันที่บันทึก: 2026-05-31
-> หลัง deploy: G3 Confidence threshold + Notifications + Password hash (PBKDF2)
+> อัปเดตล่าสุด: 2026-07-11 — OCR Stabilization sprint close (deploy `a878584d`)
 > Production URL: https://ocr-web-service.jiatuntiwong.workers.dev
+
+## ✅ Landed since last audit (2026-07-11 sprint close)
+
+- **F4 Upload size guard** (20 MB cap, `FILE_TOO_LARGE` code) — API-3
+- **Retry failed OCR UI** (temp 0.6 + overflow menu / kbd R) — OCR-3 + UI-4c
+- **Page selection UI** (thumbnail picker, cap 5) — API-1 + UI-1, closes issue 1.3
+- **Vertex AI provider** (express mode, `x-goog-api-key` header) — AI-1
+- **Credit model switcher** (per_page default, admin-switchable to field_formula / per_file) — BILL-1
+- **OCR workspace v3** (stepper, page picker, hint drawing toggle, fulldoc mode, ⚡ Quick mode) — UI-4/4b/4c, flag ON in prod
+- **Template picker with delete** (⭐ favourites / 🕐 recent / 📋 all, inline-confirm delete, system templates gated) — UI-6
+- **Coded errors on OCR routes** + `friendlyError()` catalog (OCR + auth flows only) — API-2 + UI-3, closes H1-H4 for those flows
+- **Atomic credit charge** (`chargeCreditsAtomic()`) + admin API key masking — BILL-1
 
 ---
 
@@ -246,7 +258,7 @@ CREATE INDEX idx_skills_public ON skills(visibility) WHERE visibility = 'public'
 ### Reliability / Ops
 - [ ] **Error tracking** (Sentry / Cloudflare logs ที่ดูง่ายขึ้น)
 - [ ] **Background job queue** (OCR ยาวๆ ใช้ `ctx.waitUntil` ซึ่งจะ kill ที่ ~30s)
-- [ ] **Retry failed OCR UI** (เห็น status: error แต่กด retry ไม่ได้)
+- [x] **Retry failed OCR UI** — done 2026-07-11 (OCR-3 handler `temperature: 0.6` + UI-4c overflow menu "Retry" / kbd R in `OCRWorkspaceV2`). See `pm/reports/OCR-3.md`, `pm/reports/UI-4c.md`
 - [ ] **Health check endpoint monitoring** (มี `/api/status` แต่ใครเรียก / monitor อยู่?)
 - [ ] **Reduce verbose console.log** ใน webhook/stripe (10 จุด emoji-style debug logs)
 
@@ -265,7 +277,7 @@ CREATE INDEX idx_skills_public ON skills(visibility) WHERE visibility = 'public'
 ### Other UX
 - [ ] **F1** PDF page navigator buttons
 - [ ] **F3** Light-theme palette QA
-- [ ] **F4** Upload size guard
+- [x] **F4** Upload size guard — done 2026-07-09 (API-3, 20 MB cap, `pm/reports/API-3.md`)
 - [ ] **F5** Mixed file types in Compare
 
 ---

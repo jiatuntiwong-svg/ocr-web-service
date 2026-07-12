@@ -6,7 +6,7 @@ import { requireAdmin } from "@/lib/auth/guards";
 
 export interface AIConfig {
     id: string;
-    provider: string; // 'gemini' | 'openai' | 'openrouter'
+    provider: string; // 'gemini' | 'vertex_ai' | 'openai' | 'openrouter'
     model: string;
     apiKey: string;
     label: string;
@@ -49,11 +49,21 @@ export async function GET(req: NextRequest) {
             isActive: c.isActive !== false // Default to true if undefined
         }));
 
-        // Mask keys for frontend
-        const masked = all.map(c => ({
-            ...c,
-            apiKey: c.apiKey.length > 8 ? c.apiKey.substring(0, 6) + "...." + c.apiKey.substring(c.apiKey.length - 4) : "****"
-        }));
+        // Mask keys for frontend (BILL-1 tightening after /security-review 2026-07-09):
+        // preserve only the fixed provider prefix + last 4 chars. The previous
+        // `first6 + "...." + last4` variant leaked 2 non-prefix chars from AIza
+        // keys and ~3 from sk-… keys. Now: `<prefix>...<last4>` where <prefix>
+        // is `AIza`, `sk-`, `sk-or-`, or `••••` fallback — never key material.
+        const maskApiKey = (raw: string): string => {
+            if (!raw || raw.length <= 8) return "****";
+            const last4 = raw.substring(raw.length - 4);
+            const prefix = raw.startsWith("sk-or-") ? "sk-or-"
+                : raw.startsWith("sk-")           ? "sk-"
+                : raw.startsWith("AIza")          ? "AIza"
+                : "••••";
+            return `${prefix}...${last4}`;
+        };
+        const masked = all.map(c => ({ ...c, apiKey: maskApiKey(c.apiKey) }));
 
         return NextResponse.json({ configs: masked });
     } catch (err: any) {

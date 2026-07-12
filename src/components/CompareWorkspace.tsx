@@ -1,5 +1,5 @@
 "use client";
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { User } from "@/lib/types";
 import { Document, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/Page/TextLayer.css";
@@ -10,6 +10,17 @@ import { apiError } from "@/lib/friendlyError";
 import { fetchJson } from "@/lib/fetchJson";
 import { ErrorCode } from "@/lib/errorCodes";
 import { estimateCredits, creditTone } from "@/lib/pricing";
+import { usePanZoom } from "@/lib/hooks/usePanZoom";
+import { ENABLE_OCR_SCAN_LINE, ENABLE_FIELD_POP, ENABLE_HIGHLIGHT_PIPELINE_V2, ENABLE_TEXT_LAYER_EXTRACTION, ENABLE_BBOX_VALIDATION, ENABLE_TEXT_LAYER_SEARCH, ENABLE_TABLE_INFERENCE, ENABLE_HIGHLIGHT_POSTPROCESS, ENABLE_TEMPLATE_RULEBASE } from "@/lib/featureFlags";
+import CorrectionModal from "./CorrectionModal";
+import TemplateRulesPanel from "./TemplateRulesPanel";
+import { getPageTextLayer, runHighlightPipeline, logStats, deriveTableDiffCells } from "@/lib/highlight-pipeline";
+import html2canvas from "html2canvas";
+
+// Stagger helper: capped delay so 30+ fields don't lag (matches OCRWorkspace).
+const fieldPopStyle = (i: number): React.CSSProperties =>
+    ENABLE_FIELD_POP ? { animationDelay: `${Math.min(i, 14) * 0.08}s` } : {};
+const FIELD_POP_CLASS = ENABLE_FIELD_POP ? "docroom-field-pop" : "";
 import {
     evaluateConfirm,
     makeFingerprint,
@@ -38,7 +49,7 @@ import { exportCompareResult } from "@/lib/exportUtils";
 import { matchValueToTokens, mergeTokenBoxes } from "@/lib/text-matcher";
 import type { OCRToken } from "@/lib/types";
 
-interface ExtractField { id: string; name: string; type: "text" | "number" | "currency" | "date" | "address" | "email" | "table"; }
+interface ExtractField { id: string; name: string; type: "text" | "number" | "currency" | "date" | "address" | "email" | "table" | "raw_text"; }
 interface Template { id: string; name: string; fields_json: string; user_id?: string; }
 interface HighlightBox { page: number; x: number; y: number; width: number; height: number; text?: string; confidence?: number; }
 interface CompareField {
@@ -74,6 +85,12 @@ const TYPE_COLOR: Record<string, string> = {
     address:  "#8b5cf6",
     email:    "#06b6d4",
     table:    "#ec4899",
+    raw_text: "#dc2626",
+};
+
+// Multi-word type identifiers display as "RAW TEXT" instead of "RAW_TEXT".
+const TYPE_LABEL: Record<string, string> = {
+    raw_text: "RAW TEXT",
 };
 
 const ACCENT = "#f59e0b"; // Compare zone accent (amber per design tokens)
@@ -159,7 +176,39 @@ function getImageRenderedRect(el: HTMLImageElement) {
 }
 
 // ─── PRESERVED: Document preview component (highlight math, do not touch) ───
-const DocumentPreviewWithHighlights = ({ file, url, idx, highlights = [], selectedFieldKey, showHighlights = true, excelOriginal = null, result = null, zoom = 1 }: any) => {
+const DocumentPreviewWithHighlights = ({ file, url, idx, highlights = [], selectedFieldKey, showHighlights = true, excelOriginal = null, result = null, zoom = 1, onZoomChange, isProcessing = false, showOnlyDiff = false, highlightStyle = "box", onSaveReady }: any) => {
+    // Pan + wheel-zoom + dbl-click reset. setZoom is wired through the parent so
+    // the existing per-slot zoom state (zooms[idx]) stays the source of truth.
+    const panZoom = usePanZoom({
+        zoom,
+        setZoom: (z: number) => onZoomChange?.(z),
+    });
+    // Preserve preview scroll across re-renders. Tracks the user's latest
+    // scroll position via scroll listener; restored in a layout effect so the
+    // snap-to-top from highlight-rect changes never paints.
+    const lastPreviewScroll = useRef({ top: 0, left: 0 });
+    useEffect(() => {
+        const el = panZoom.containerRef.current;
+        if (!el) return;
+        const onScroll = () => {
+            lastPreviewScroll.current.top = el.scrollTop;
+            lastPreviewScroll.current.left = el.scrollLeft;
+        };
+        el.addEventListener("scroll", onScroll, { passive: true });
+        return () => el.removeEventListener("scroll", onScroll);
+    }, [panZoom.containerRef]);
+    useLayoutEffect(() => {
+        const el = panZoom.containerRef.current;
+        if (!el) return;
+        if (el.scrollTop !== lastPreviewScroll.current.top || el.scrollLeft !== lastPreviewScroll.current.left) {
+            el.scrollTop = lastPreviewScroll.current.top;
+            el.scrollLeft = lastPreviewScroll.current.left;
+        }
+    });
+
+    // Tracker for the smart auto-scroll effect declared further down (after
+    // activeHighlights is computed). Kept up here next to the related refs.
+    const prevSelectedFieldKeyRef = useRef<string | null | undefined>(undefined);
     const [numPages, setNumPages] = useState<number>();
     const [pageNumber, setPageNumber] = useState<number>(1);
     const containerRef = useRef<HTMLDivElement>(null);
@@ -196,6 +245,8 @@ const DocumentPreviewWithHighlights = ({ file, url, idx, highlights = [], select
         const out: ExcelCellRef[] = [];
         for (const f of result.fields as any[]) {
             if (selectedFieldKey && f.key !== selectedFieldKey) continue;
+            // Respect the "show only diff" toggle so Excel matches PDF/image.
+            if (showOnlyDiff && !f.is_diff) continue;
             const val = f[docKey];
             // Skip table-type values (arrays/objects) — too noisy to text-match.
             if (val == null || typeof val === "object") continue;
@@ -203,15 +254,47 @@ const DocumentPreviewWithHighlights = ({ file, url, idx, highlights = [], select
                 const k = `${cell.sheet}:${cell.row}:${cell.col}`;
                 if (seen.has(k)) continue;
                 seen.add(k);
-                out.push(cell);
+                // Attach isDiff so ExcelPreview can pick green-match vs
+                // red-diff per cell, matching PDF/image highlight colors.
+                out.push({ ...cell, isDiff: !!f.is_diff });
             }
         }
         return out;
-    }, [excelOriginal, excelSheets, result, selectedFieldKey, showHighlights, idx]);
+    }, [excelOriginal, excelSheets, result, selectedFieldKey, showHighlights, showOnlyDiff, idx]);
 
-    const activeHighlights = !showHighlights ? [] : highlights
+    // Phase 2 pipeline state. Declared before activeHighlights so the
+    // computation below can reference effectiveHighlights without TDZ issues.
+    // The actual pipeline runner lives in a useEffect further down — it
+    // populates enrichedGroups asynchronously when flags are enabled.
+    const [enrichedGroups, setEnrichedGroups] = useState<typeof highlights | null>(null);
+    const effectiveHighlights = enrichedGroups ?? highlights;
+    // Compute effective diff per group at render time — defensively covers
+    // any path where the upstream isDiff didn't pick up row-level table diffs
+    // (pipeline didn't run, AI returned is_diff=false for tables, etc.).
+    // This is the single source of truth for highlight color so Doc 1 and
+    // Doc 2 stay consistent regardless of which step produced the box.
+    const groupIsDiff = (h: any): boolean => {
+        if (!!h.isDiff) return true;
+        const field = result?.fields?.find((f: any) => f.key === h.key);
+        if (field?.rows) {
+            try { return deriveTableDiffCells(field.rows, idx).length > 0; } catch { return false; }
+        }
+        return false;
+    };
+    const activeHighlights = !showHighlights ? [] : effectiveHighlights
         .filter((h: any) => !selectedFieldKey || h.key === selectedFieldKey)
-        .flatMap((h: any) => h.boxes || []);
+        .filter((h: any) => !showOnlyDiff || groupIsDiff(h))
+        .flatMap((h: any) => {
+            const effDiff = groupIsDiff(h);
+            return (h.boxes || []).map((b: any) => ({
+                ...b,
+                // box's own _isDiff (set by Step 3 table-inferred) wins;
+                // otherwise inherit group's effective diff.
+                _isDiff: b._isDiff === true ? true : effDiff,
+                _confidenceLevel: b.confidenceLevel,
+                _source: b.source,
+            }));
+        });
 
     useEffect(() => {
         if (selectedFieldKey && activeHighlights.length > 0) {
@@ -220,6 +303,177 @@ const DocumentPreviewWithHighlights = ({ file, url, idx, highlights = [], select
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selectedFieldKey, highlights]);
+
+    // ─── Highlight Pipeline v2 — Phase 1: Foundation (text layer probe) ───
+    // Pre-warm the cache for the current page so the Phase 2 pipeline below
+    // doesn't pay extraction latency on its first run. No render impact.
+    useEffect(() => {
+        if (!ENABLE_HIGHLIGHT_PIPELINE_V2 || !ENABLE_TEXT_LAYER_EXTRACTION) return;
+        if (!file || file.type !== "application/pdf") return;
+        let cancelled = false;
+        getPageTextLayer(file, pageNumber).then(layer => {
+            if (cancelled) return;
+            // eslint-disable-next-line no-console
+            console.log("[hpv2] text layer", {
+                doc: idx + 1, file: file.name, page: pageNumber,
+                items: layer?.items.length ?? 0,
+                sample: layer?.items.slice(0, 3).map(i => i.str),
+            });
+        });
+        return () => { cancelled = true; };
+    }, [file, idx, pageNumber]);
+
+    // ─── Phase 2: Pipeline orchestration ───
+    // Runs the validate → search cascade against the AI highlights and stores
+    // an enriched copy in `enrichedGroups` (state declared above so the
+    // render-time computation can read it). If the pipeline fails or is
+    // disabled, enrichedGroups stays null → render uses the original
+    // highlights prop unchanged. Rollback-safe by construction.
+    useEffect(() => {
+        if (!ENABLE_HIGHLIGHT_PIPELINE_V2) { setEnrichedGroups(null); return; }
+        if (!file || file.type !== "application/pdf") { setEnrichedGroups(null); return; }
+        if (!result?.fields) { setEnrichedGroups(null); return; }
+        // Build pipeline input. Two passes:
+        //   1. Take AI groups as-is.
+        //   2. Compute the "effective isDiff" per group — for TABLE fields,
+        //      AI sometimes flags is_diff=false even when individual rows
+        //      differ. Without this override the box renders as green (match)
+        //      and confuses the user (result panel says "ต่าง", document says
+        //      "match"). Row-derived diff overrides AI's field-level flag.
+        //   3. Seed any field that should produce highlights (is_diff true OR
+        //      table with row diffs) but isn't already a group.
+        const fieldByKey = new Map<string, any>();
+        for (const f of result.fields as any[]) fieldByKey.set(f.key, f);
+        const hasRowDiff = (f: any): boolean => {
+            if (!f?.rows) return false;
+            return deriveTableDiffCells(f.rows, idx).length > 0;
+        };
+        const seedGroups = (highlights as any[]).map(g => {
+            const f = fieldByKey.get(g.key);
+            const effectiveDiff = !!g.isDiff || hasRowDiff(f);
+            return { ...g, isDiff: effectiveDiff };
+        });
+        const seenKeys = new Set(seedGroups.map((g: any) => g.key));
+        for (const f of result.fields as any[]) {
+            const isDiffField = !!f.is_diff || hasRowDiff(f);
+            if (!isDiffField) continue;
+            if (seenKeys.has(f.key)) continue;
+            seedGroups.push({ key: f.key, isDiff: true, boxes: [] });
+        }
+        if (seedGroups.length === 0) { setEnrichedGroups(null); return; }
+        let cancelled = false;
+        runHighlightPipeline({
+            file,
+            paneIdx: idx,
+            groups: seedGroups,
+            fields: result.fields as any,
+            flags: {
+                bboxValidation: ENABLE_BBOX_VALIDATION,
+                textSearch: ENABLE_TEXT_LAYER_SEARCH,
+                tableInference: ENABLE_TABLE_INFERENCE,
+                postprocess: ENABLE_HIGHLIGHT_POSTPROCESS,
+            },
+        }).then(({ groups, stats }) => {
+            if (cancelled) return;
+            logStats(stats);
+            setEnrichedGroups(groups as any);
+        }).catch(err => {
+            console.error("[hpv2] pipeline error — falling back to raw highlights", err);
+            if (!cancelled) setEnrichedGroups(null);
+        });
+        return () => { cancelled = true; };
+    }, [file, idx, highlights, result]);
+
+    // Smart auto-scroll: when a new field is selected and its first highlight
+    // box is outside the visible viewport, smooth-scroll the preview to center
+    // the box. If already on screen → do nothing (Option B). Runs after the
+    // setPageNumber effect above so by the time the timeout fires, the PDF
+    // page is the right one.
+    useEffect(() => {
+        const el = panZoom.containerRef.current;
+        const prev = prevSelectedFieldKeyRef.current;
+        prevSelectedFieldKeyRef.current = selectedFieldKey;
+        if (!el || prev === selectedFieldKey) return;
+        if (!selectedFieldKey || activeHighlights.length === 0) return;
+        const box = activeHighlights[0];
+        const tid = setTimeout(() => {
+            const isPdf = file?.type === "application/pdf";
+            const refEl = isPdf ? pdfPageRef.current : imgRef.current;
+            const containerEl = panZoom.containerRef.current;
+            if (!refEl || !containerEl) return;
+            const cRect = containerEl.getBoundingClientRect();
+            const rRect = refEl.getBoundingClientRect();
+            // Box position in the scrollable content (page/image-relative
+            // coords → container-relative pixel coords).
+            const boxLeft = (rRect.left - cRect.left) + containerEl.scrollLeft + box.x * rRect.width;
+            const boxTop = (rRect.top - cRect.top) + containerEl.scrollTop + box.y * rRect.height;
+            const boxW = box.width * rRect.width;
+            const boxH = box.height * rRect.height;
+            // Already on screen? Bail — no disruption when user is already
+            // looking at the right place.
+            const visLeft = containerEl.scrollLeft;
+            const visTop = containerEl.scrollTop;
+            if (boxLeft >= visLeft && boxLeft + boxW <= visLeft + containerEl.clientWidth
+                && boxTop >= visTop && boxTop + boxH <= visTop + containerEl.clientHeight) return;
+            // Center the box. Update the preserved-scroll ref so the next
+            // layout-effect cycle doesn't yank us back to the old position.
+            const targetLeft = Math.max(0, boxLeft + boxW / 2 - containerEl.clientWidth / 2);
+            const targetTop = Math.max(0, boxTop + boxH / 2 - containerEl.clientHeight / 2);
+            lastPreviewScroll.current.left = targetLeft;
+            lastPreviewScroll.current.top = targetTop;
+            containerEl.scrollTo({ left: targetLeft, top: targetTop, behavior: "smooth" });
+        }, 120);
+        return () => clearTimeout(tid);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selectedFieldKey, file?.type, activeHighlights]);
+
+    const saveSnapshot = React.useCallback(async () => {
+        // Capture the page/image element WITH the absolute-positioned highlight
+        // overlays inside it, then download as PNG. Errors are surfaced via
+        // console so we don't lose them silently like the previous version.
+        if (excelOriginal) {
+            console.warn("[saveSnapshot] Excel preview — skipped");
+            return;
+        }
+        const isPdf = file?.type === "application/pdf";
+        const target = isPdf ? pdfPageRef.current : imgWrapRef.current;
+        if (!target) {
+            console.error("[saveSnapshot] target ref is null", { isPdf });
+            return;
+        }
+        try {
+            const canvas = await html2canvas(target, {
+                backgroundColor: "#ffffff",
+                scale: 2,
+                useCORS: true,
+                logging: false,
+            });
+            const blob: Blob | null = await new Promise(res => canvas.toBlob(b => res(b), "image/png"));
+            if (!blob) {
+                console.error("[saveSnapshot] toBlob returned null");
+                return;
+            }
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            const baseName = (file?.name || `doc${idx + 1}`).replace(/\.[^.]+$/, "");
+            a.href = url;
+            a.download = `${baseName}_highlighted.png`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        } catch (e) {
+            console.error("[saveSnapshot] html2canvas / download failed", e);
+        }
+    }, [file, idx, excelOriginal]);
+    // Publish the save callback to the parent so the Save button can live in
+    // the pane header (outside the pan-zoom container which was intercepting
+    // mousedown and racing the button click).
+    useEffect(() => {
+        if (!onSaveReady) return;
+        onSaveReady(saveSnapshot);
+        return () => onSaveReady(null);
+    }, [onSaveReady, saveSnapshot]);
 
     const recalculateImageHighlights = React.useCallback(() => {
         if (!imgRef.current || !containerRef.current || file?.type === "application/pdf") return;
@@ -236,22 +490,42 @@ const DocumentPreviewWithHighlights = ({ file, url, idx, highlights = [], select
         const rects = activeHighlights.map((box: any) => {
             const conf = typeof box.confidence === "number" ? box.confidence : 1;
             const lowConf = conf < 0.6;
-            return {
+            const isDiff = !!box._isDiff;
+            const lvl: "high" | "medium" | "low" | undefined = box._confidenceLevel;
+            const useLvl = lvl !== undefined;
+            const dashed = useLvl ? lvl === "low" : lowConf;
+            const borderPx = useLvl ? (lvl === "high" ? 2.5 : lvl === "medium" ? 2 : 1.5) : 2;
+            const bgAlpha = useLvl ? (lvl === "high" ? 0.32 : lvl === "medium" ? 0.20 : 0.12) : 0.18;
+            const color = isDiff ? "rgba(239, 68, 68, 0.95)" : "rgba(16, 185, 129, 0.95)";
+            const bg = isDiff ? `rgba(239, 68, 68, ${bgAlpha})` : `rgba(16, 185, 129, ${bgAlpha})`;
+            const glow = isDiff ? "0 0 8px rgba(239,68,68,0.55)" : "0 0 8px rgba(16,185,129,0.55)";
+            const isUnderline = highlightStyle === "underline";
+            const base: React.CSSProperties = {
                 position: 'absolute' as const,
                 left: relativeOffsetX + offsetX + box.x * renderedW + "px",
                 top: relativeOffsetY + offsetY + box.y * renderedH + "px",
                 width: box.width * renderedW + "px",
                 height: box.height * renderedH + "px",
-                border: lowConf ? '2px dashed rgba(245, 158, 11, 0.95)' : '2px solid rgba(59, 130, 246, 0.9)',
-                backgroundColor: lowConf ? 'rgba(245, 158, 11, 0.18)' : 'rgba(59, 130, 246, 0.2)',
-                boxShadow: lowConf ? '0 0 8px rgba(245,158,11,0.45)' : '0 0 8px rgba(59,130,246,0.5)',
                 pointerEvents: 'none' as const,
                 transition: 'all 0.15s ease',
                 zIndex: 20,
             };
+            return isUnderline
+                ? {
+                    ...base,
+                    borderBottom: `${borderPx}px ${dashed ? "dashed" : "solid"} ${color}`,
+                    background: "transparent",
+                }
+                : {
+                    ...base,
+                    border: `${borderPx}px ${dashed ? "dashed" : "solid"} ${color}`,
+                    backgroundColor: bg,
+                    boxShadow: useLvl && lvl !== "high" ? "none" : glow,
+                    borderRadius: 2,
+                };
         });
         setImageRects(rects);
-    }, [activeHighlights, file?.type]);
+    }, [activeHighlights, file?.type, highlightStyle]);
 
     useEffect(() => {
         recalculateImageHighlights();
@@ -283,13 +557,53 @@ const DocumentPreviewWithHighlights = ({ file, url, idx, highlights = [], select
     const renderPdfHighlightBox = (box: any, i: number) => {
         const conf = typeof box.confidence === "number" ? box.confidence : 1;
         const lowConf = conf < 0.6;
-        const cls = lowConf
-            ? "absolute border-2 border-dashed border-amber-500 bg-amber-500/20 shadow-[0_0_8px_rgba(245,158,11,0.5)] z-20 pointer-events-none transition-all duration-300 animate-in fade-in zoom-in-95"
-            : "absolute border-2 border-blue-500 bg-blue-500/20 shadow-[0_0_8px_rgba(59,130,246,0.6)] z-20 pointer-events-none transition-all duration-300 animate-in fade-in zoom-in-95";
+        const isDiff = !!box._isDiff;
+        // Pipeline v2 emits _confidenceLevel = "high" | "medium" | "low".
+        // When present it OVERRIDES the legacy `conf < 0.6` heuristic so the
+        // visual hierarchy reflects pipeline trust rather than raw AI score.
+        const lvl: "high" | "medium" | "low" | undefined = box._confidenceLevel;
+        const useLvl = lvl !== undefined;
+        const dashed = useLvl ? lvl === "low" : lowConf;
+        const borderPx = useLvl ? (lvl === "high" ? 2.5 : lvl === "medium" ? 2 : 1.5) : 2;
+        const bgAlpha = useLvl ? (lvl === "high" ? 0.32 : lvl === "medium" ? 0.20 : 0.12) : 0.18;
+        // Red = diff, Green = match. Low confidence ⇒ dashed border.
+        const color = isDiff
+            ? "rgba(239, 68, 68, 0.95)"
+            : "rgba(16, 185, 129, 0.95)";
+        const bg = isDiff
+            ? `rgba(239, 68, 68, ${bgAlpha})`
+            : `rgba(16, 185, 129, ${bgAlpha})`;
+        const glow = isDiff
+            ? "0 0 8px rgba(239,68,68,0.55)"
+            : "0 0 8px rgba(16,185,129,0.55)";
+        const isUnderline = highlightStyle === "underline";
+        const inlineStyle: React.CSSProperties = isUnderline
+            ? {
+                position: "absolute",
+                borderBottom: `${borderPx}px ${dashed ? "dashed" : "solid"} ${color}`,
+                background: "transparent",
+                boxShadow: "none",
+                zIndex: 20,
+                pointerEvents: "none",
+            }
+            : {
+                position: "absolute",
+                border: `${borderPx}px ${dashed ? "dashed" : "solid"} ${color}`,
+                background: bg,
+                boxShadow: useLvl && lvl === "high" ? glow : (useLvl ? "none" : glow),
+                borderRadius: 2,
+                zIndex: 20,
+                pointerEvents: "none",
+            };
+        const titleParts: string[] = [];
+        if (isDiff) titleParts.push("Diff");
+        else titleParts.push("Match");
+        if (lowConf) titleParts.push(`Low confidence (${(conf * 100).toFixed(0)}%)`);
         return (
-            <div key={i} className={cls}
-                title={lowConf ? `Low confidence (${(conf * 100).toFixed(0)}%)` : undefined}
+            <div key={i}
+                title={titleParts.join(" · ")}
                 style={{
+                    ...inlineStyle,
                     left: (box.x * 100).toFixed(4) + "%",
                     top: (box.y * 100).toFixed(4) + "%",
                     width: (box.width * 100).toFixed(4) + "%",
@@ -313,7 +627,34 @@ const DocumentPreviewWithHighlights = ({ file, url, idx, highlights = [], select
     }
 
     return (
-        <div className="relative shadow-sm mx-auto w-full h-full min-h-[50vh] overflow-auto bg-slate-200/50 dark:bg-slate-900/50 flex justify-center p-4 custom-scrollbar" ref={containerRef}>
+        <div
+            className="relative shadow-sm mx-auto w-full h-full min-h-[50vh] overflow-auto bg-slate-200/50 dark:bg-slate-900/50 flex p-4 custom-scrollbar"
+            ref={(el) => {
+                // Two refs share this node: existing one for highlight math, the
+                // new one for pan/zoom scroll control.
+                (containerRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
+                (panZoom.containerRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
+            }}
+            onMouseDown={panZoom.containerProps.onMouseDown}
+            onMouseMove={panZoom.containerProps.onMouseMove}
+            onMouseUp={panZoom.containerProps.onMouseUp}
+            onMouseLeave={panZoom.containerProps.onMouseLeave}
+            onDoubleClick={panZoom.containerProps.onDoubleClick}
+            style={{
+                // `safe center` keeps the doc centered when it fits but falls back
+                // to `start` when zoomed past container width — otherwise plain
+                // center clips the LEFT edge when scrolled all the way left.
+                // Tailwind has no `safe` variant so the value is inline.
+                justifyContent: "safe center",
+                alignItems: "safe center",
+                ...panZoom.containerProps.style,
+            }}
+        >
+            {/* Scan-line overlay while AI compare is running. Same feature flag
+                as OCR; falls back gracefully when flag is off. */}
+            {ENABLE_OCR_SCAN_LINE && isProcessing && (
+                <div className="docroom-scan-line" aria-hidden />
+            )}
             {file.type === "application/pdf" ? (
                 // PDF: CSS `zoom` scales the page + percentage-based highlight
                 // overlays together — math stays consistent.
@@ -484,6 +825,72 @@ export default function CompareWorkspace({ user, balance = 0 }: Props) {
     const [result, setResult] = useState<CompareResult | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [isExpandedView, setIsExpandedView] = useState(false);
+    // Right-hand result panel collapsed → preview takes the full row.
+    // Decoupled from `isExpandedView` (which is the fullscreen-result mode).
+    const [resultCollapsed, setResultCollapsed] = useState(false);
+    // Phase D: rules the server injected into this Compare run. Keyed by
+    // field target so the result panel can render a small badge per field.
+    const [appliedRules, setAppliedRules] = useState<Array<{ id: string; type: string; naturalLang: string; target: string | null }>>([]);
+    // Phase A-E: open/close the rule browser modal.
+    const [rulesModalOpen, setRulesModalOpen] = useState(false);
+    // Per-pane Save snapshot callbacks — child publishes its save function so
+    // the button can live in the pane header (outside the pan-zoom container).
+    const saveSnapshotRefs = useRef<Map<number, (() => Promise<void>) | null>>(new Map());
+    const [savingPane, setSavingPane] = useState<number | null>(null);
+    const triggerSaveSnapshot = async (paneIdx: number) => {
+        const fn = saveSnapshotRefs.current.get(paneIdx);
+        if (!fn) { console.warn("[saveSnapshot] no callback registered for pane", paneIdx); return; }
+        setSavingPane(paneIdx);
+        try { await fn(); } finally { setSavingPane(null); }
+    };
+    // Scroll preservation for the result list. Without this, clicking a field
+    // (which updates selectedFieldKey + activeHighlights + highlight rects)
+    // sometimes makes the panel snap back to top because React's commit phase
+    // changes layout-affecting properties. The ref tracks the user's latest
+    // scrollTop continuously; after every relevant state change we restore it.
+    const resultScrollRef = useRef<HTMLDivElement | null>(null);
+    const lastResultScroll = useRef(0);
+    useEffect(() => {
+        const el = resultScrollRef.current;
+        if (!el) return;
+        const onScroll = () => { lastResultScroll.current = el.scrollTop; };
+        el.addEventListener("scroll", onScroll, { passive: true });
+        return () => el.removeEventListener("scroll", onScroll);
+    }, [result]);
+    // Highlight display preferences — persisted so users don't reset on reload.
+    // Default `showOnlyDiff = true` (Phase 4 / D5 decision) so the workspace
+    // opens in "scan and spot" mode by default. Returning users keep whatever
+    // they had stored.
+    const [showOnlyDiff, setShowOnlyDiff] = useState(true);
+    const [highlightStyle, setHighlightStyle] = useState<"box" | "underline">("box");
+    const [diffOnlyHintSeen, setDiffOnlyHintSeen] = useState(true);
+    useEffect(() => {
+        try {
+            const d = localStorage.getItem("compare_show_only_diff");
+            if (d != null) setShowOnlyDiff(d === "1");
+            const s = localStorage.getItem("compare_highlight_style");
+            if (s === "box" || s === "underline") setHighlightStyle(s);
+            // First-time hint: shown once when DIFF-only is the default.
+            const seen = localStorage.getItem("compare_diff_only_hint_seen");
+            setDiffOnlyHintSeen(seen === "1");
+        } catch {}
+    }, []);
+    useEffect(() => {
+        try { localStorage.setItem("compare_show_only_diff", showOnlyDiff ? "1" : "0"); } catch {}
+    }, [showOnlyDiff]);
+    useEffect(() => {
+        try { localStorage.setItem("compare_highlight_style", highlightStyle); } catch {}
+    }, [highlightStyle]);
+    // Restore result panel scroll after any state that causes a re-render of
+    // the result list — runs in the layout phase so the snap-to-top never
+    // paints. (Field selection, diff-only toggle, style toggle.)
+    useLayoutEffect(() => {
+        const el = resultScrollRef.current;
+        if (!el) return;
+        if (lastResultScroll.current && el.scrollTop !== lastResultScroll.current) {
+            el.scrollTop = lastResultScroll.current;
+        }
+    });
     const [ocrSourceMethods, setOcrSourceMethods] = useState<SourceMethod[]>([]);
 
     // Verdict mode — controls how the server decides is_diff (and how the
@@ -501,6 +908,15 @@ export default function CompareWorkspace({ user, balance = 0 }: Props) {
     // Templates
     const [templates, setTemplates] = useState<Template[]>([]);
     const [activeTemplateId, setActiveTemplateId] = useState<string | null>(null);
+    // Phase B: "Mark wrong" target. When set, the CorrectionModal opens for
+    // this field — value is captured from result.fields and persisted via
+    // /api/templates/corrections so future phases can turn it into a rule.
+    const [correctionTarget, setCorrectionTarget] = useState<{
+        fieldKey: string;
+        fieldLabel: string;
+        currentValue?: string;
+        paneIdx?: number;
+    } | null>(null);
     const [templateName, setTemplateName] = useState("");
     const [templateSearch, setTemplateSearch] = useState("");
     const [bookmarkedIds, setBookmarkedIds] = useState<string[]>([]);
@@ -518,6 +934,22 @@ export default function CompareWorkspace({ user, balance = 0 }: Props) {
     const setZoomAt = (idx: number, next: number) => {
         const v = Math.max(0.5, Math.min(3, +next.toFixed(2)));
         setZooms(prev => { const n = [...prev]; n[idx] = v; return n; });
+    };
+    // Drag-to-reorder state for the field chips below. Browser threshold
+    // distinguishes click (= remove) from drag (= reorder) automatically.
+    const [draggingFieldId, setDraggingFieldId] = useState<string | null>(null);
+    const [dropTargetFieldId, setDropTargetFieldId] = useState<string | null>(null);
+    const reorderField = (fromId: string, toId: string) => {
+        if (fromId === toId) return;
+        setExtractFields(prev => {
+            const fromIdx = prev.findIndex(x => x.id === fromId);
+            const toIdx = prev.findIndex(x => x.id === toId);
+            if (fromIdx < 0 || toIdx < 0) return prev;
+            const arr = [...prev];
+            const [moved] = arr.splice(fromIdx, 1);
+            arr.splice(toIdx, 0, moved);
+            return arr;
+        });
     };
     const [extractFields, setExtractFields] = useState<ExtractField[]>([
         { id: "1", name: "ประเภทเอกสาร", type: "text" },
@@ -784,6 +1216,10 @@ export default function CompareWorkspace({ user, balance = 0 }: Props) {
         const stringifiedFields = extractFields.map(f => f.type !== "text" ? `${f.name} (${f.type})` : f.name).join(", ");
         if (stringifiedFields) formData.append("fields", stringifiedFields);
         formData.append("verdictMode", verdictMode);
+        // Phase D — anchor rules to the active template so the backend can
+        // inject them into the AI prompt. Optional: legacy compares without
+        // a chosen template still work, the server short-circuits the helper.
+        if (activeTemplateId) formData.append("templateId", activeTemplateId);
 
         const extractResults = await Promise.all(validFiles.map(f => extractTokensWithMethod(f)));
         const allTokens: OCRToken[][] = extractResults.map(r => r.tokens);
@@ -1193,6 +1629,7 @@ export default function CompareWorkspace({ user, balance = 0 }: Props) {
             });
 
             setResult({ ...aiResult, fields: enrichedFields });
+            setAppliedRules(Array.isArray((data as any).rules_applied) ? (data as any).rules_applied : []);
             setIsExpandedView(true);
             // Feed the rolling avg used by T2 (relative spike) trigger.
             // Use the credits the server actually charged when available.
@@ -1230,7 +1667,10 @@ export default function CompareWorkspace({ user, balance = 0 }: Props) {
         return result.fields.map(field => {
             const docKey = `doc${docIndex + 1}` as keyof NonNullable<CompareField['locations']>;
             const boxes = field.locations && field.locations[docKey] ? field.locations[docKey] : [];
-            return { key: field.key, boxes };
+            // isDiff travels with the highlight group so the per-box renderer
+            // can pick green-match vs red-diff colors without re-looking up
+            // the field record.
+            return { key: field.key, isDiff: !!field.is_diff, boxes };
         }).filter(h => h.boxes && h.boxes.length > 0);
     };
 
@@ -1256,7 +1696,7 @@ export default function CompareWorkspace({ user, balance = 0 }: Props) {
         }}>
             {/* Documents grid */}
             <div style={{
-                flex: result ? "1 1 60%" : "1 1 100%",
+                flex: (result && !resultCollapsed) ? "1 1 60%" : "1 1 100%",
                 display: "grid",
                 gridTemplateColumns: `repeat(${files.length}, 1fr)`,
                 gap: 8, minWidth: 0,
@@ -1301,6 +1741,19 @@ export default function CompareWorkspace({ user, balance = 0 }: Props) {
                                         style={headerZoomBtnStyle((zooms[idx] ?? 1) >= 3)}
                                         title="Zoom in"
                                     >+</button>
+                                    <button
+                                        onClick={() => triggerSaveSnapshot(idx)}
+                                        disabled={savingPane === idx}
+                                        style={{
+                                            ...headerZoomBtnStyle(savingPane === idx),
+                                            marginLeft: 4,
+                                            display: "inline-flex", alignItems: "center", gap: 3,
+                                        }}
+                                        title={t("compare.saveSnapshot")}
+                                    >
+                                        <Icon.Download width={10} height={10} />
+                                        {savingPane === idx ? "..." : "PNG"}
+                                    </button>
                                 </div>
                             )}
                             <label style={{
@@ -1372,6 +1825,11 @@ export default function CompareWorkspace({ user, balance = 0 }: Props) {
                                     excelOriginal={excelOriginals[idx]}
                                     result={result}
                                     zoom={zooms[idx] ?? 1}
+                                    onZoomChange={(z: number) => setZoomAt(idx, z)}
+                                    isProcessing={loading}
+                                    showOnlyDiff={showOnlyDiff}
+                                    highlightStyle={highlightStyle}
+                                    onSaveReady={(fn: any) => { saveSnapshotRefs.current.set(idx, fn); }}
                                 />
                             )}
                         </div>
@@ -1379,8 +1837,38 @@ export default function CompareWorkspace({ user, balance = 0 }: Props) {
                 ))}
             </div>
 
-            {/* Result panel */}
-            {result && (
+            {/* Result panel — collapsed: slim strip with expand button. */}
+            {result && resultCollapsed && (
+                <div style={{
+                    flex: "0 0 36px", display: "flex", flexDirection: "column",
+                    alignItems: "center", gap: 8, padding: "8px 4px",
+                    background: "var(--color-bg-card)",
+                    border: "1px solid var(--color-border)",
+                    borderRadius: 10,
+                }}>
+                    <button
+                        onClick={() => setResultCollapsed(false)}
+                        title={t("compare.showResultPanel")}
+                        style={{
+                            ...iconActionStyle(ACCENT),
+                            background: `${ACCENT}22`,
+                            borderColor: `${ACCENT}55`,
+                            padding: "6px 5px",
+                        }}
+                    >
+                        <Icon.ChevronLeft width={12} height={12} />
+                    </button>
+                    <div style={{
+                        writingMode: "vertical-rl", transform: "rotate(180deg)",
+                        fontSize: 11, fontWeight: 700, color: "var(--color-text-2)",
+                        letterSpacing: 1.2, textTransform: "uppercase",
+                        userSelect: "none",
+                    }}>
+                        {t("compare.resultTitle")} · {t("compare.resultDiffs", { count: diffCount })}
+                    </div>
+                </div>
+            )}
+            {result && !resultCollapsed && (
                 <div style={{
                     flex: "1 1 40%", minWidth: 320, maxWidth: 480,
                     display: "flex", flexDirection: "column", minHeight: 0,
@@ -1422,6 +1910,44 @@ export default function CompareWorkspace({ user, balance = 0 }: Props) {
                             }}>
                             <Icon.Eye width={11} height={11} />
                         </button>
+                        <button onClick={() => setShowOnlyDiff(v => !v)}
+                            title={showOnlyDiff ? t("compare.showAllHighlights") : t("compare.showOnlyDiff")}
+                            style={{
+                                ...iconActionStyle("var(--color-text-2)"),
+                                background: showOnlyDiff ? "rgba(239,68,68,0.18)" : "transparent",
+                                color: showOnlyDiff ? "var(--color-danger)" : "var(--color-text-2)",
+                                borderColor: showOnlyDiff ? "rgba(239,68,68,0.5)" : "var(--color-border)",
+                                fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
+                            }}>
+                            {showOnlyDiff ? t("compare.diffOnlyShort") : t("compare.allShort")}
+                        </button>
+                        <button onClick={() => setHighlightStyle(s => s === "box" ? "underline" : "box")}
+                            title={highlightStyle === "box" ? t("compare.useUnderline") : t("compare.useBox")}
+                            style={{
+                                ...iconActionStyle("var(--color-text-2)"),
+                                fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
+                            }}>
+                            {highlightStyle === "box" ? "▭" : "_"}
+                        </button>
+                        {/* Phase A-E: Rule browser button — visible only when a
+                            template is active so the panel has something to scope. */}
+                        {ENABLE_TEMPLATE_RULEBASE && activeTemplateId && (
+                            <button
+                                onClick={() => setRulesModalOpen(true)}
+                                title={t("compare.openRules")}
+                                style={{
+                                    ...iconActionStyle("var(--color-text-2)"),
+                                    fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
+                                    display: "inline-flex", alignItems: "center", gap: 3,
+                                }}>
+                                📋 Rules
+                            </button>
+                        )}
+                        <button onClick={() => setResultCollapsed(true)}
+                            title={t("compare.hideResultPanel")}
+                            style={iconActionStyle("var(--color-text-2)")}>
+                            <Icon.ChevronRight width={11} height={11} />
+                        </button>
                         {inExpanded && (
                             <button onClick={() => setIsExpandedView(false)}
                                 title={t("compare.closeExpanded")}
@@ -1435,7 +1961,36 @@ export default function CompareWorkspace({ user, balance = 0 }: Props) {
                         )}
                     </div>
 
-                    <div className="custom-scrollbar" style={{ flex: 1, overflowY: "auto", padding: 10 }}>
+                    <div ref={resultScrollRef} className="custom-scrollbar" style={{ flex: 1, overflowY: "auto", padding: 10 }}>
+                        {/* First-time hint: explains why Match fields look hidden.
+                            Once dismissed (per localStorage), never shows again. */}
+                        {showOnlyDiff && !diffOnlyHintSeen && (
+                            <div style={{
+                                padding: "10px 12px", marginBottom: 10,
+                                borderRadius: 8, border: `1px solid ${ACCENT}55`,
+                                background: `${ACCENT}13`, display: "flex",
+                                alignItems: "flex-start", gap: 8,
+                            }}>
+                                <Icon.Eye width={13} height={13} color={ACCENT} style={{ flexShrink: 0, marginTop: 2 }} />
+                                <div style={{ flex: 1, fontSize: 11.5, color: "var(--color-text-1)", lineHeight: 1.4 }}>
+                                    {t("compare.diffOnlyHint")}
+                                </div>
+                                <button
+                                    onClick={() => {
+                                        setDiffOnlyHintSeen(true);
+                                        try { localStorage.setItem("compare_diff_only_hint_seen", "1"); } catch {}
+                                    }}
+                                    style={{
+                                        flexShrink: 0, background: "transparent",
+                                        border: "none", cursor: "pointer",
+                                        color: "var(--color-text-3)", padding: 2,
+                                    }}
+                                    title={t("common.close")}
+                                >
+                                    <Icon.X width={11} height={11} />
+                                </button>
+                            </div>
+                        )}
                         {ocrSourceMethods.length > 0 && ocrSourceMethods.some(m => m === "none") && (
                             <div style={{ padding: 10, borderRadius: 8, background: "rgba(245,158,11,0.10)", border: "1px solid rgba(245,158,11,0.3)", marginBottom: 10 }}>
                                 <p style={{ fontSize: 11.5, fontWeight: 700, color: ACCENT, marginBottom: 4 }}>{t("compare.ocrFailed")}</p>
@@ -1470,46 +2025,20 @@ export default function CompareWorkspace({ user, balance = 0 }: Props) {
                         ) : (
                             result.fields.map((field, i) => {
                                 const isSelected = selectedFieldKey === field.key;
-                                // Table fields always render the row-detail panel —
-                                // a collapsed "7 rows" summary hides the data the
-                                // user actually needs to verify.
-                                if (!field.is_diff && !field.rows) {
-                                    const minConf = Math.min(
-                                        ...[field.doc1_confidence, field.doc2_confidence, field.doc3_confidence]
-                                            .filter((v): v is number => typeof v === "number"),
-                                    );
-                                    const showConf = Number.isFinite(minConf);
-                                    return (
-                                        <div key={i}
-                                            onClick={() => setSelectedFieldKey(isSelected ? null : field.key)}
-                                            style={{
-                                                padding: "7px 10px", marginBottom: 4, cursor: "pointer",
-                                                background: isSelected ? `${ACCENT}18` : "transparent",
-                                                border: `1px solid ${isSelected ? `${ACCENT}44` : "var(--color-border)"}`,
-                                                borderRadius: 6,
-                                                display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center",
-                                                color: "var(--color-text-3)", opacity: isSelected ? 1 : 0.75,
-                                            }}>
-                                            <span style={{ fontSize: 11, fontWeight: 700, color: isSelected ? ACCENT : "var(--color-text-2)" }}>
-                                                {field.key}
-                                            </span>
-                                            <span style={{ display: "flex", gap: 6, alignItems: "center", maxWidth: "60%" }}>
-                                                <span style={{ fontSize: 11, textAlign: "right", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                                    {field.doc1}
-                                                </span>
-                                                {showConf && <ConfidenceBadge value={minConf} />}
-                                            </span>
-                                        </div>
-                                    );
-                                }
+                                // All field cards use the same full layout so
+                                // matching fields also show full values + the
+                                // WRONG button (rules can be created off matches
+                                // too, e.g. to lock in an alignment that worked).
                                 return (
-                                    <div key={i}
+                                    <div key={field.key || i}
+                                        className={FIELD_POP_CLASS}
                                         onClick={() => setSelectedFieldKey(isSelected ? null : field.key)}
                                         style={{
                                             padding: 10, marginBottom: 8, cursor: "pointer",
                                             background: isSelected ? `${ACCENT}13` : "var(--color-bg-elevated)",
                                             border: `1px solid ${isSelected ? `${ACCENT}55` : "var(--color-border)"}`,
                                             borderRadius: 8,
+                                            ...fieldPopStyle(i),
                                         }}>
                                         <div style={{
                                             fontSize: 11, fontWeight: 700, color: isSelected ? ACCENT : "var(--color-text-2)",
@@ -1539,17 +2068,142 @@ export default function CompareWorkspace({ user, balance = 0 }: Props) {
                                                         {t("compare.viewingHighlights")}
                                                     </span>
                                                 )}
+                                                {/* Phase D: badge if any rule applied to this field. */}
+                                                {(() => {
+                                                    const fired = appliedRules.find(r => r.target && (r.target === field.key || r.target.toLowerCase() === String(field.key).toLowerCase()));
+                                                    return fired ? (
+                                                        <span
+                                                            title={fired.naturalLang}
+                                                            style={{
+                                                                fontSize: 9, background: "rgba(139,92,246,0.15)",
+                                                                color: "#8b5cf6", padding: "2px 6px",
+                                                                borderRadius: 10, fontWeight: 700,
+                                                                display: "inline-flex", alignItems: "center", gap: 3,
+                                                            }}
+                                                        >💡 RULE</span>
+                                                    ) : null;
+                                                })()}
+                                                {/* Phase B mark-wrong trigger. Requires an active template
+                                                    (rules are template-scoped per D1) and the rulebase flag. */}
+                                                {ENABLE_TEMPLATE_RULEBASE && activeTemplateId && (
+                                                    <button
+                                                        onClick={(ev) => {
+                                                            ev.stopPropagation();
+                                                            setCorrectionTarget({
+                                                                fieldKey: field.key,
+                                                                fieldLabel: field.key,
+                                                                currentValue: field.doc1 ?? field.doc2 ?? "",
+                                                                paneIdx: 0,
+                                                            });
+                                                        }}
+                                                        title={t("correction.title")}
+                                                        style={{
+                                                            background: "transparent",
+                                                            border: "1px solid var(--color-border)",
+                                                            color: "var(--color-warning)",
+                                                            fontSize: 9, fontWeight: 700,
+                                                            padding: "2px 6px", borderRadius: 10,
+                                                            cursor: "pointer", display: "inline-flex",
+                                                            alignItems: "center", gap: 3,
+                                                        }}
+                                                    >
+                                                        <Icon.X width={9} height={9} />
+                                                        WRONG
+                                                    </button>
+                                                )}
                                             </span>
                                         </div>
                                         {field.rows ? (
                                             <TableDiffPanel field={field} t={t} hasDoc3={files.length === 3} verdictMode={verdictMode} />
                                         ) : (
                                             <>
-                                                <DocRow label={t("compare.docLabel", { n: 1 })} value={field.doc1} color="var(--color-danger)" t={t} confidence={field.doc1_confidence} />
-                                                <DocRow label={t("compare.docLabel", { n: 2 })} value={field.doc2} color="var(--color-success)" t={t} confidence={field.doc2_confidence} />
-                                                {files.length === 3 && (
-                                                    <DocRow label={t("compare.docLabel", { n: 3 })} value={field.doc3} color={ACCENT} t={t} confidence={field.doc3_confidence} />
-                                                )}
+                                                {(() => {
+                                                    // Pre-compute prefix/suffix split so each DocRow can
+                                                    // highlight just its differing slice. Only when the
+                                                    // field is flagged as a diff — match fields shouldn't
+                                                    // get the highlight at all.
+                                                    const parts = field.is_diff
+                                                        ? computeDocDiffParts(files.length === 3 ? [field.doc1, field.doc2, (field as any).doc3] : [field.doc1, field.doc2])
+                                                        : null;
+                                                    return (
+                                                        <>
+                                                            <DocRow label={t("compare.docLabel", { n: 1 })} value={field.doc1} color="var(--color-danger)" t={t} confidence={field.doc1_confidence} diffParts={parts?.[0] ?? null} />
+                                                            <DocRow label={t("compare.docLabel", { n: 2 })} value={field.doc2} color="var(--color-success)" t={t} confidence={field.doc2_confidence} diffParts={parts?.[1] ?? null} />
+                                                            {files.length === 3 && (
+                                                                <DocRow label={t("compare.docLabel", { n: 3 })} value={field.doc3} color={ACCENT} t={t} confidence={field.doc3_confidence} diffParts={parts?.[2] ?? null} />
+                                                            )}
+                                                        </>
+                                                    );
+                                                })()}
+                                                {/* Difference summary — shows ONLY the fragment(s) that
+                                                    actually differ between the documents, so the user
+                                                    doesn't have to spot the change manually. Uses AI's
+                                                    docN_diff when available, otherwise derives via a
+                                                    cheap prefix/suffix trim so the user always gets a
+                                                    DIFF row when a field is flagged as different. */}
+                                                {(() => {
+                                                    if (!field.is_diff) return null;
+                                                    const aiD1 = field.doc1_diff?.length ? field.doc1_diff.join(" / ") : null;
+                                                    const aiD2 = field.doc2_diff?.length ? field.doc2_diff.join(" / ") : null;
+                                                    const aiD3 = (field as any).doc3_diff?.length ? (field as any).doc3_diff.join(" / ") : null;
+                                                    let d1 = aiD1, d2 = aiD2, d3 = aiD3;
+                                                    // Fallback: cheap char-level diff (common prefix +
+                                                    // common suffix trimmed). Good enough for typos,
+                                                    // trailing chars, short substring changes.
+                                                    if (!aiD1 && !aiD2 && field.doc1 != null && field.doc2 != null) {
+                                                        const a = String(field.doc1), b = String(field.doc2);
+                                                        if (a !== b) {
+                                                            let s = 0;
+                                                            while (s < a.length && s < b.length && a[s] === b[s]) s++;
+                                                            let eA = a.length - 1, eB = b.length - 1;
+                                                            while (eA >= s && eB >= s && a[eA] === b[eB]) { eA--; eB--; }
+                                                            d1 = a.substring(s, eA + 1).trim() || null;
+                                                            d2 = b.substring(s, eB + 1).trim() || null;
+                                                        }
+                                                    }
+                                                    if (files.length === 3 && !aiD3 && field.doc1 != null && (field as any).doc3 != null) {
+                                                        const a = String(field.doc1), c = String((field as any).doc3);
+                                                        if (a !== c) {
+                                                            let s = 0;
+                                                            while (s < a.length && s < c.length && a[s] === c[s]) s++;
+                                                            let eA = a.length - 1, eC = c.length - 1;
+                                                            while (eA >= s && eC >= s && a[eA] === c[eC]) { eA--; eC--; }
+                                                            d3 = c.substring(s, eC + 1).trim() || null;
+                                                        }
+                                                    }
+                                                    if (!d1 && !d2 && !d3) return null;
+                                                    return (
+                                                        <div style={{
+                                                            marginTop: 6, paddingTop: 6,
+                                                            borderTop: "1px dashed var(--color-border-strong)",
+                                                            display: "flex", flexWrap: "wrap", alignItems: "baseline",
+                                                            gap: 6, fontSize: 11.5,
+                                                        }}>
+                                                            <span style={{
+                                                                fontSize: 9.5, fontWeight: 700,
+                                                                letterSpacing: 0.8, textTransform: "uppercase",
+                                                                color: "var(--color-text-3)",
+                                                            }}>
+                                                                {t("compare.differenceLabel")}
+                                                            </span>
+                                                            <span style={{ color: "var(--color-danger)", fontWeight: 600, whiteSpace: "pre" }}>
+                                                                {d1 ? `"${d1}"` : `(${t("compare.diffMissing")})`}
+                                                            </span>
+                                                            <span style={{ color: "var(--color-text-4)" }}>:</span>
+                                                            <span style={{ color: "var(--color-success)", fontWeight: 600, whiteSpace: "pre" }}>
+                                                                {d2 ? `"${d2}"` : `(${t("compare.diffMissing")})`}
+                                                            </span>
+                                                            {files.length === 3 && (
+                                                                <>
+                                                                    <span style={{ color: "var(--color-text-4)" }}>:</span>
+                                                                    <span style={{ color: ACCENT, fontWeight: 600, whiteSpace: "pre" }}>
+                                                                        {d3 ? `"${d3}"` : `(${t("compare.diffMissing")})`}
+                                                                    </span>
+                                                                </>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                })()}
                                             </>
                                         )}
                                     </div>
@@ -1870,17 +2524,39 @@ export default function CompareWorkspace({ user, balance = 0 }: Props) {
                         }}>
                             {extractFields.map(f => {
                                 const c = TYPE_COLOR[f.type] || ACCENT;
+                                const isDragging = draggingFieldId === f.id;
+                                const isDropTarget = dropTargetFieldId === f.id && draggingFieldId && draggingFieldId !== f.id;
                                 return (
                                     <button key={f.id} className="compare-chip"
+                                        draggable
+                                        onDragStart={(e) => {
+                                            setDraggingFieldId(f.id);
+                                            e.dataTransfer.effectAllowed = "move";
+                                            e.dataTransfer.setData("text/plain", f.id);
+                                        }}
+                                        onDragEnter={() => setDropTargetFieldId(f.id)}
+                                        onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; }}
+                                        onDrop={(e) => {
+                                            e.preventDefault();
+                                            if (draggingFieldId) reorderField(draggingFieldId, f.id);
+                                            setDraggingFieldId(null);
+                                            setDropTargetFieldId(null);
+                                        }}
+                                        onDragEnd={() => { setDraggingFieldId(null); setDropTargetFieldId(null); }}
                                         onClick={() => setExtractFields(prev => prev.filter(x => x.id !== f.id))}
                                         style={{
                                             display: "inline-flex", alignItems: "center", gap: 5,
-                                            padding: "5px 10px", borderRadius: 6, cursor: "pointer",
-                                            border: `1px solid ${c}55`, background: `${c}18`,
+                                            padding: "5px 10px", borderRadius: 6,
+                                            cursor: isDragging ? "grabbing" : "grab",
+                                            border: `1px solid ${isDropTarget ? c : `${c}55`}`,
+                                            background: `${c}18`,
                                             color: c, fontSize: 12.5, fontWeight: 600,
+                                            opacity: isDragging ? 0.35 : 1,
+                                            boxShadow: isDropTarget ? `0 0 0 2px ${c}66` : "none",
+                                            transition: "background 0.15s, border-color 0.15s, opacity 0.15s, box-shadow 0.15s",
                                             ["--chip-color" as any]: c,
-                                        }} title="Click to remove">
-                                        <span style={{ fontSize: 9, opacity: 0.8, textTransform: "uppercase" }}>{f.type}</span>
+                                        }} title="Click to remove · Drag to reorder">
+                                        <span style={{ fontSize: 9, opacity: 0.8, textTransform: "uppercase" }}>{TYPE_LABEL[f.type] || f.type}</span>
                                         {f.name}
                                         <Icon.X width={10} height={10} />
                                     </button>
@@ -1911,7 +2587,7 @@ export default function CompareWorkspace({ user, balance = 0 }: Props) {
                                         fontSize: 11, fontWeight: 600, cursor: "pointer", textTransform: "uppercase",
                                         display: "inline-flex", alignItems: "center", gap: 5, minWidth: 90, justifyContent: "space-between",
                                     }}>
-                                    {newFieldType} <Icon.ChevronDown width={10} height={10} />
+                                    {TYPE_LABEL[newFieldType] || newFieldType} <Icon.ChevronDown width={10} height={10} />
                                 </button>
                                 {isTypeDropdownOpen && (
                                     <>
@@ -1934,7 +2610,7 @@ export default function CompareWorkspace({ user, balance = 0 }: Props) {
                                                         width: "100%", textAlign: "left",
                                                     }}>
                                                     <span style={{ width: 6, height: 6, borderRadius: "50%", background: TYPE_COLOR[typ] }} />
-                                                    {typ}
+                                                    {TYPE_LABEL[typ] || typ}
                                                 </button>
                                             ))}
                                         </div>
@@ -2031,6 +2707,50 @@ export default function CompareWorkspace({ user, balance = 0 }: Props) {
                 onCancel={() => setPendingDeleteId(null)}
                 onConfirm={confirmDelete}
             />
+
+            {/* Phase A-E: Rule browser modal — also as right-side panel so it
+                sits above the fullscreen result view and keeps the compare
+                visible on the left for reference. */}
+            {rulesModalOpen && activeTemplateId && (
+                <>
+                    <div
+                        onClick={() => setRulesModalOpen(false)}
+                        style={{
+                            position: "fixed", inset: 0, zIndex: 100,
+                            background: "rgba(0,0,0,0.25)", cursor: "pointer",
+                        }}
+                    />
+                    <div
+                        onClick={e => e.stopPropagation()}
+                        style={{
+                            position: "fixed", top: 16, right: 16, bottom: 16,
+                            width: "min(560px, 92vw)",
+                            zIndex: 101,
+                            animation: "slide-in-right 0.18s ease-out",
+                        }}
+                    >
+                        <TemplateRulesPanel
+                            templateId={activeTemplateId}
+                            onClose={() => setRulesModalOpen(false)}
+                        />
+                    </div>
+                </>
+            )}
+
+            {/* Phase B: Mark-wrong correction modal */}
+            {correctionTarget && activeTemplateId && (
+                <CorrectionModal
+                    open={true}
+                    onClose={() => setCorrectionTarget(null)}
+                    templateId={activeTemplateId}
+                    fieldKey={correctionTarget.fieldKey}
+                    fieldLabel={correctionTarget.fieldLabel}
+                    currentValue={correctionTarget.currentValue}
+                    paneIdx={correctionTarget.paneIdx}
+                    availableFieldKeys={result?.fields?.map(f => f.key) || []}
+                    currentResultFields={result?.fields || []}
+                />
+            )}
         </>
     );
 }
@@ -2047,7 +2767,29 @@ function iconActionStyle(color: string): React.CSSProperties {
     };
 }
 
-function DocRow({ label, value, color, t, confidence }: { label: string; value?: string | null; color: string; t: any; confidence?: number }) {
+function DocRow({ label, value, color, t, confidence, diffParts }: { label: string; value?: string | null; color: string; t: any; confidence?: number; diffParts?: { prefix: string; middle: string; suffix: string } | null }) {
+    // When `diffParts` is provided, wrap the middle (differing) segment in a
+    // styled mark inline so the user spots the change without having to
+    // cross-reference the DIFF row. Falls back to the plain value otherwise.
+    const renderValue = () => {
+        if (!value) return <em style={{ opacity: 0.5, textDecoration: "line-through", fontStyle: "italic" }}>{t("compare.noValue")}</em>;
+        if (!diffParts || !diffParts.middle) return value;
+        return (
+            <>
+                {diffParts.prefix}
+                <mark style={{
+                    background: `${color}33`,
+                    color,
+                    padding: "0 3px",
+                    borderRadius: 3,
+                    border: `1.5px solid ${color}`,
+                    fontWeight: 700,
+                    whiteSpace: "pre",
+                }}>{diffParts.middle}</mark>
+                {diffParts.suffix}
+            </>
+        );
+    };
     return (
         <div style={{ display: "flex", gap: 8, alignItems: "flex-start", paddingTop: 5, paddingBottom: 5, borderTop: "1px solid var(--color-border)" }}>
             <span style={{
@@ -2059,13 +2801,33 @@ function DocRow({ label, value, color, t, confidence }: { label: string; value?:
                 {label}
             </span>
             <span style={{ fontSize: 12, color, fontWeight: 500, whiteSpace: "pre-line", wordBreak: "break-word", flex: 1 }}>
-                {value || <em style={{ opacity: 0.5, textDecoration: "line-through", fontStyle: "italic" }}>{t("compare.noValue")}</em>}
+                {renderValue()}
             </span>
             {typeof confidence === "number" && (
                 <ConfidenceBadge value={confidence} />
             )}
         </div>
     );
+}
+
+// Cross-doc diff: split each value into common prefix + middle (differing) +
+// common suffix, computed across ALL provided values. Used by DocRow above
+// to highlight only the differing slice inside the full original string.
+function computeDocDiffParts(values: (string | null | undefined)[]): { prefix: string; middle: string; suffix: string }[] {
+    const strs = values.map(v => v == null ? "" : String(v));
+    if (strs.length === 0 || strs.every(s => s === strs[0])) {
+        return strs.map(s => ({ prefix: s, middle: "", suffix: "" }));
+    }
+    const minLen = Math.min(...strs.map(s => s.length));
+    let p = 0;
+    while (p < minLen && strs.every(s => s[p] === strs[0][p])) p++;
+    let suf = 0;
+    while (suf < minLen - p && strs.every(s => s[s.length - 1 - suf] === strs[0][strs[0].length - 1 - suf])) suf++;
+    return strs.map(s => ({
+        prefix: s.substring(0, p),
+        middle: s.substring(p, s.length - suf),
+        suffix: s.substring(s.length - suf),
+    }));
 }
 
 // Compact pill showing AI extraction confidence (0-100). Tone tracks the

@@ -1,7 +1,39 @@
 # Credit Pricing — Executive Review
 
-> **DRAFT v1.1** · 2026-06-04 · Engineering + Product
+> **DRAFT v1.2** · 2026-07-09 (BILL-1) · verified sprint-close 2026-07-11
+> Engineering + Product
+> BILL-1 landed: **1 หน้า = 1 credit** เป็น default ใหม่สำหรับ OCR, สลับได้ผ่าน admin
+> Sprint-close verify (2026-07-11, deploy `a878584d`): `src/lib/pricing.ts` matches this
+> doc — `CreditModel = "per_page" | "field_formula" | "per_file"`,
+> `DEFAULT_CREDIT_MODEL = "per_page"`. Charging goes through
+> `chargeCreditsAtomic()` in both `/api/upload` and `/api/v1/extract`.
 > รอ adjust หลังรอบทดสอบกับ user จริง
+
+---
+
+## 🆕 BILL-1 update (2026-07-09)
+
+**Decision (operator, 2026-07-08):** OCR credit charging **default เปลี่ยนเป็น "1 หน้า = 1 credit"** (per_page). สูตร field-formula เดิม + third option "per-file" เก็บไว้เป็น reserve models สลับได้ผ่าน admin tier-control **ไม่ต้อง redeploy**.
+
+**Config:** `src/lib/pricing.ts` → `CreditModel = "per_page" | "field_formula" | "per_file"`, default `per_page`
+**Admin toggle:** `/api/admin/tier-config` (GET returns `credit_model` + `credit_models`; POST accepts `credit_model` field)
+**Charge math per model** (OCR only — Compare ใช้สูตรเดิมจนกว่าจะตัดสินแยก):
+
+| Scenario | per_page (new default) | field_formula (reserve) | per_file |
+|----------|-----------|-----------------|----------|
+| 1-page PDF | 1 | ceil(ocrFactor × mult) | 1 |
+| 5-page PDF, 3 pages selected | 3 | ceil(ocrFactor × mult) | 1 |
+| Batch × 3 files (1 page each) | 3 (per file) | ×3 (per file) | 3 |
+| Single image | 1 | ceil(ocrFactor × mult) | 1 |
+
+**Migration**: ไม่มี retroactive change; `documents.credits_used` เก็บค่าที่ charge จริงตอนนั้น
+**Metering**: `logAiUsage` ไม่แตะ — ยังบันทึก token จริงทุก run เพื่อ validate ว่า per_page cover cost (หลัง crop pass + per-page parallel Sprint 2+)
+
+**Security fixes ที่มัดใน BILL-1** (จาก /security-review 2026-07-09):
+- Credit deduction race: `/api/v1/extract` unguarded `UPDATE credits_remaining - 1` → เปลี่ยนเป็น `chargeCreditsAtomic()` (single guarded statement, `credits_remaining` drain first + spill to `extra_credits`, 0 rows = INSUFFICIENT_CREDITS). `/api/upload` refactor เข้า helper เดียวกัน ป้องกัน drift ระหว่าง 2 paths ในอนาคต
+- Admin settings mask: `first6 + "...." + last4` → `<prefix>...<last4>` (fixed prefix เท่านั้น — `AIza` / `sk-` / `sk-or-` / `••••`), no key material leaked
+
+---
 
 ---
 
@@ -321,7 +353,8 @@ Stripe = 2.95% + ฿10/transaction (per top-up purchase)
 |--|--|--|
 | Pre-run estimate | [src/lib/pricing.ts](../src/lib/pricing.ts) | `estimateCredits()` |
 | Post-run actual | [src/lib/pricing.ts](../src/lib/pricing.ts) | `actualCredits()` |
-| Credit charging | [src/app/api/upload/route.ts](../src/app/api/upload/route.ts) | atomic UPDATE |
+| Credit charging (shared helper) | [src/lib/credits.ts](../src/lib/credits.ts) | `chargeCreditsAtomic()` — used by `/api/upload` + `/api/v1/extract` |
+| Active credit model lookup | [src/lib/credits.ts](../src/lib/credits.ts) | `getActiveCreditModel(env)` |
 | Tier config | [src/lib/tier-config.ts](../src/lib/tier-config.ts) | `loadTierCredits()` |
 | Admin tuning UI | [src/components/AdminTierControlView.tsx](../src/components/AdminTierControlView.tsx) | — |
 

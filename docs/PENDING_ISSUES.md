@@ -80,7 +80,7 @@ type ExcelHighlight = { sheet: number; row: number; col: number };
 | F1 | Multi-page PDF page navigator (Prev/Next buttons + page-count indicator) — currently relies on scroll | 🟢 low |
 | F2 | Manual review UX — buttons to override AI ("actually same" / "actually diff") to protect against false negatives | 🟡 mid |
 | F3 | Light-theme palette fine-tune — current values are placeholders, not design-QA'd | 🟢 low |
-| F4 | Upload size guard — docx-to-image has no cap; very large embedded images can OOM the canvas | 🟢 low |
+| F4 | ~~Upload size guard~~ — ✅ **DONE 2026-07-09 via API-3** (20 MB cap on `/api/upload` + `/api/v1/extract`, `FILE_TOO_LARGE` code, enforced before credit/R2/`arrayBuffer()`). See `pm/reports/API-3.md` | ✅ done |
 | F5 | Mixed file types in Compare (e.g. Doc1=PDF + Doc2=Excel) — currently assumes one type per run | 🟢 low |
 
 ---
@@ -325,6 +325,17 @@ For users who want extracted data beyond just Compare:
 ---
 
 ## H. Error UX audit (added 2026-05-25)
+
+> **Status update 2026-07-09** — OCR-flow + auth-flow scope closed by the
+> `d8f0a581` bundle (API-2 + API-3 + UI-3). The tables below still list every
+> call-site from the original audit; strikethrough marks the ones addressed
+> this sprint. Compare workspace, admin views, documents view, and billing
+> remain on the pre-catalog path and are queued for Phase 7.5.
+>
+> - **H1** — `OCRWorkspace.tsx:217`, `login/page.tsx:41`, `register/page.tsx:59` → ✅ done (UI-3). Compare / admin / billing → open.
+> - **H2** — `/api/upload`, `/api/status`, `/api/v1/extract` → ✅ done (API-2). `/api/compare`, `/api/templates`, `/api/stats`, `/api/billing/checkout` → open.
+> - **H3** — Error catalog + backend codes + `apiError()` helper → ✅ done for OCR-flow keys (`errors.*` + `errorCodes.*` in th + en). Admin catalog + broader classification → open.
+> - **H4** — Raw-payload strip from `/api/v1/extract` errors → ✅ done (API-2 routes AI-response text to `logSystemEvent("V1_EXTRACT_PARSE_FAIL", ...)`).
 
 User sees raw API error strings everywhere — they leak technical detail
 (stack traces, "AI returned invalid format", HTTP codes, English-only).

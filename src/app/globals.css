@@ -92,6 +92,10 @@ body {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+@keyframes slide-in-right {
+  from { transform: translateX(20px); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
 
 .view-enter {
   animation: fadeIn 0.18s ease;
@@ -135,6 +139,145 @@ html, body {
     flex: 1 1 auto !important;
     min-height: 360px;
   }
+}
+
+/* ─── OCR visual effects ───────────────────────────────────────────────────
+ * Both scoped to single class names so flipping featureFlags.ts off makes
+ * them vanish — no other style touches the document preview / result rows. */
+
+/* Scan-line: animated horizontal light bar sweeping top → bottom over the
+ * document preview while OCR runs. The container that gets this overlay must
+ * be position:relative so the absolute child anchors correctly. */
+.docroom-scan-line {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 6;
+}
+.docroom-scan-line::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 4px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(6, 182, 212, 0) 4%,
+    rgba(165, 243, 252, 1) 50%,
+    rgba(6, 182, 212, 0) 96%,
+    transparent 100%
+  );
+  box-shadow:
+    0 0 14px rgba(6, 182, 212, 1),
+    0 0 36px rgba(6, 182, 212, 0.7),
+    0 0 70px rgba(6, 182, 212, 0.35);
+  animation: docroom-scan-sweep 1.6s linear infinite;
+  /* will-change hints the browser to composite this layer for smooth animation
+     of `top` (which is normally not as fast as `transform` but acceptable for
+     a single thin line — we have to use `top` because transform % is relative
+     to the element, not the parent, which made the bar travel only 4px). */
+  will-change: top;
+}
+.docroom-scan-line::after {
+  /* Soft trailing halo behind the line — gives the "afterimage" feel. */
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 90px;
+  background: linear-gradient(
+    180deg,
+    rgba(6, 182, 212, 0) 0%,
+    rgba(6, 182, 212, 0.16) 70%,
+    rgba(6, 182, 212, 0) 100%
+  );
+  animation: docroom-scan-halo 1.6s linear infinite;
+  animation-delay: -0.06s; /* trail slightly behind the bar */
+  will-change: top;
+}
+@keyframes docroom-scan-sweep {
+  /* Animate `top` so the % is relative to the parent (visible viewport of
+     the scroll container), not to the 4px line itself.
+     The bar travels until its bottom edge touches the container's bottom
+     (top = 100% - 4px), holds there briefly while fading, then resets. */
+  0%   { top: -12px;                opacity: 0; }
+  6%   { opacity: 1; }
+  88%  { top: calc(100% - 4px);     opacity: 1; }
+  100% { top: calc(100% - 4px);     opacity: 0; }
+}
+@keyframes docroom-scan-halo {
+  /* Halo trails behind the bar — also ends at the bottom edge before fading. */
+  0%   { top: -90px;                opacity: 0; }
+  10%  { opacity: 1; }
+  88%  { top: calc(100% - 90px);    opacity: 1; }
+  100% { top: calc(100% - 90px);    opacity: 0; }
+}
+
+/* Field pop-in: staggered via inline animation-delay set per row in JSX. */
+.docroom-field-pop {
+  animation: docroom-field-pop 380ms cubic-bezier(.34,1.56,.64,1) backwards;
+  transform-origin: left center;
+}
+@keyframes docroom-field-pop {
+  0%   { opacity: 0; transform: scale(0.7) translateY(6px); }
+  60%  { opacity: 1; transform: scale(1.05) translateY(0); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+/* ─── Mini story loading panel ─────────────────────────────────────────── */
+/* Each step has its dot state driven by JSX (done/active/pending classNames).
+ * Active dot pulses; transitions on opacity for the smooth step→step feel. */
+.docroom-story-step {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 12.5px;
+  padding: 4px 0;
+  transition: opacity 0.3s, color 0.3s;
+}
+.docroom-story-step .docroom-story-dot {
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: background 0.3s, box-shadow 0.3s, transform 0.3s;
+}
+/* Pending: muted grey */
+.docroom-story-pending { opacity: 0.4; color: var(--color-text-3); }
+.docroom-story-pending .docroom-story-dot {
+  background: var(--color-bg-elevated);
+  border: 1.5px solid var(--color-border-strong);
+}
+/* Active: cyan with pulsing glow */
+.docroom-story-active { color: var(--color-text-1); font-weight: 600; }
+.docroom-story-active .docroom-story-dot {
+  background: rgba(6, 182, 212, 0.95);
+  box-shadow: 0 0 0 0 rgba(6, 182, 212, 0.7);
+  animation: docroom-story-pulse 1.4s ease-in-out infinite;
+}
+/* Done: green check */
+.docroom-story-done { color: var(--color-text-2); opacity: 0.8; }
+.docroom-story-done .docroom-story-dot {
+  background: var(--color-success);
+  color: #0a1628;
+}
+@keyframes docroom-story-pulse {
+  0%   { box-shadow: 0 0 0 0   rgba(6, 182, 212, 0.6); transform: scale(1); }
+  60%  { box-shadow: 0 0 0 10px rgba(6, 182, 212, 0);   transform: scale(1.08); }
+  100% { box-shadow: 0 0 0 0   rgba(6, 182, 212, 0);   transform: scale(1); }
+}
+
+/* Respect users who don't want motion — clear stagger AND make the animation
+ * a single instant frame so the effect still completes (otherwise content
+ * stays opacity:0 from the keyframe). */
+@media (prefers-reduced-motion: reduce) {
+  .docroom-scan-line { display: none; }
+  .docroom-field-pop {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+  .docroom-story-active .docroom-story-dot { animation: none; }
 }
 
 /* Phones — drop dashboard's 4-column metric grid to 2 cols, shrink chrome. */

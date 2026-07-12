@@ -7,7 +7,7 @@
 
 import * as XLSX from "xlsx";
 
-export interface ExcelCellRef { sheet: number; row: number; col: number }
+export interface ExcelCellRef { sheet: number; row: number; col: number; isDiff?: boolean }
 export interface ExcelSheet {
     name: string;
     rows: any[][];   // 2D array, blank-padded so row.length is consistent

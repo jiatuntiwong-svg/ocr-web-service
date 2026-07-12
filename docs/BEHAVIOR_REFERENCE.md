@@ -2,7 +2,7 @@
 
 > **Purpose:** Owner-side checklist for verifying that the Docker build
 > behaves identically to the Cloudflare production app.
-> **Snapshot date:** 2026-06-14
+> **Snapshot date:** 2026-07-11 (OCR Stabilization sprint close, deploy `a878584d`)
 > **Production URL:** https://ocr-web-service.jiatuntiwong.workers.dev
 >
 > Use this doc to:
@@ -75,14 +75,31 @@ Test files:
 | Logout | Session cleared, redirect to `/login` |  |
 | Legacy plaintext-password user logs in | **Login succeeds**, password is silently rehashed to `pbkdf2$…` in DB on success | Owner can verify by inspecting `users.password` before/after |
 
-### 4.2 OCR Workspace (single doc extract)
+### 4.2 OCR Workspace v2 (single doc extract)
+
+Since 2026-07-11 the flag `ENABLE_OCR_WORKSPACE_V2` is **ON in prod** —
+`src/app/(app)/ocr/page.tsx` routes to `OCRWorkspaceV2.tsx`. The legacy
+`OCRWorkspace.tsx` remains behind the flag as rollback surface only; every
+row below describes v2 behavior.
+
+**v2 shell:** 6-step stepper (Upload → Pages → Template → Fields → Extract →
+Result), progressive disclosure, keyboard-first (kbd R = retry in the
+result overflow menu), stage-machine driven so ⚡ Quick mode can auto-advance.
 
 | Step | Expected behavior | Notes |
 |--|--|--|
-| Click "OCR" in NavRail | Workspace loads with template rail (left) + drop zone + result panel |  |
+| Click "OCR" in NavRail | v2 workspace loads with the stepper collapsed to step 1 (Upload). No template rail — templates picked in step 3 via `<TemplatePickerPanel>` (⭐ favourites / 🕐 recent / 📋 all + delete). System templates cannot be deleted (button disabled with tooltip); user templates get inline-confirm delete with optimistic reconcile | `pm/reports/UI-4c.md`, `pm/reports/UI-6.md`, `pm/reports/UI-6-delete.md` |
+| Toggle ⚡ Quick mode (topbar) | Auto-advances Upload → Pages → Extract on file drop when a default template + fields are already set. Credit-confirm dialog still fires (never bypassed) | UI-6 §B |
+| Toggle "Full document" (topbar mode switch) | Extraction sends the whole document instead of the field-list prompt. Result table renders per-page pages. Server side of fulldoc is still Sprint 2 (API-4 / S2-2) | UI-4c §3d |
+| Toggle "Show hint boxes" (topbar) | Overlays saved `bbox_hint` rectangles on the preview; drawing/edit is a separate expander in step 3 | UI-4c §3e |
 | Pick a template that has 5 fields | Fields chip row populates with 5 chips |  |
 | Drop a Thai PDF | Preview appears in left panel + "Extract" button enabled |  |
-| Click "Extract" | Spinner appears; `processStep` text cycles | Credit cost shown next to the button |
+| Drop a PDF > 1 page | **Page picker** appears below preview (thumbnail grid). Defaults to `[1..min(N, 5)]` selected | Cap `PAGE_SELECTION_MAX` (default 5) — tunable via `NEXT_PUBLIC_PAGE_SELECTION_MAX` |
+| Drop a PDF with > 5 pages | Amber warning: "Document has {N} pages — pick up to 5". Extract still runs on the (≤5) selection | Server also enforces the cap; direct API calls without a selection get `TOO_MANY_PAGES` (400) |
+| Clear all page selections | Extract CTA disabled + tooltip "Select at least one page" |  |
+| Upload > 20 MB | Rejected before any credit deduction or AI call with `FILE_TOO_LARGE` (413) — localized toast | Cap `MAX_UPLOAD_SIZE_MB`, env-tunable; applies to `/api/upload` + `/api/v1/extract` |
+| Click "Extract" | Spinner appears; `processStep` text cycles (mini-story panel driven by `ENABLE_LOADING_STORY`) | Credit cost shown next to the button, computed via active `credit_model` — see §4.9 below |
+| Click "Retry" (result overflow menu / kbd R) | Re-runs the same file with `temperature: 0.6` to shake stuck-deterministic answers. Same credit charge as a fresh extract — retry is a full run, not a refund | OCR-3; UI merged into UI-4c overflow. Retry does not fix variance, it just gives the user a re-roll |
 | Extraction completes | **Fullscreen overlay opens** with preview (L) + result table (R) | Auto-flip to fullscreen is intended |
 | Result shows | Each field's value + confidence badge (green ≥80, amber 60-79, red <60) |  |
 | If any field confidence < user's threshold | **Notification bell** gets a "Document needs review" entry | Threshold default 70%, slider in Documents view |
@@ -91,6 +108,62 @@ Test files:
 | Click "Export Excel" / "Export CSV" | Browser downloads the file with field/value columns |  |
 | Click "New document" | Workspace resets, fullscreen exits |  |
 | Insufficient credits when clicking Extract | Modal: smart-confirm if borderline, hard error `INSUFFICIENT_CREDITS` if zero |  |
+
+#### 4.2a Hinted fields (`bbox_hint`) + crop-based extraction
+
+Templates may attach a `bbox_hint` (page + x/y/w/h in 0..1 normalized coords) to
+any field, either auto-captured on first extract or user-drawn via the preview.
+Two things happen when a field has a hint:
+
+| Behavior | Notes |
+|--|--|
+| The hint is included in the whole-image extraction prompt as a spatial anchor ("search around this region, including below if value overflows the line") | Helps disambiguate 2-column layouts and repeated labels |
+| On upload, the client crops the hinted region out of the same 3600px stacked PNG and sends the crops as `crop_<idx>` parts + a `field_crops` JSON manifest | One extra multi-image AI call per upload; skipped when no field has a hint |
+| Server merge policy: for hinted fields only, a non-null crop value **replaces** the whole-image value and the field object gains `source: "crop"`; a null crop value keeps the whole-image value and flags `crop_miss: true` in `raw_json` | Non-hinted fields are untouched; unknown crop keys are ignored |
+| Metering | Both AI calls' tokens accumulate into a single `ai_usage` row; the user is charged once per operation (unchanged) |
+| Backward-compat | Uploads without hints / without `field_crops` follow the pre-OCR-6 path exactly. Public API `/api/v1/extract` does NOT participate in the crop pass (per OCR-4 decision) |
+
+Reference: `pm/reports/OCR-6.md`, `pm/reports/OCR-6b.md` (prompt-parity + merge-provenance fix),
+`pm/reports/OCR-6c.md` (hint coordinate space = pdfjs raster), `src/lib/field-crops.ts`,
+`src/app/api/upload/route.ts` (crop-merge block).
+
+#### 4.2b Error UX (OCR + auth flows)
+
+Since 2026-07-09, `/api/upload`, `/api/status`, `/api/v1/extract` return
+`{ ok: false, code, error, vars? }` on every failure — never a raw
+`err.message` / stack. The frontend routes those through a small i18n
+catalog (`errorCodes.*` + `errors.*`) via `apiError()` / `friendlyError()`,
+so users see a localized message keyed by the code (not the backend string).
+`OCRWorkspace`, login, and register have zero raw-message setError sites.
+Compare / admin views are still on the pre-catalog path (Phase 7.5).
+
+Reference: `pm/reports/API-2.md`, `pm/reports/API-3.md`,
+`pm/reports/UI-3.md`, `src/lib/friendlyError.ts`, `src/lib/errorCodes.ts`.
+
+#### 4.2c Credit model (BILL-1, in prod since 2026-07-09)
+
+OCR credit charging is admin-switchable at runtime via
+`/api/admin/tier-config` — no redeploy needed. Default in prod is
+`per_page`.
+
+| Model | Charge math (OCR) | When it fires |
+|--|--|--|
+| **`per_page`** (default) | 1 credit per PDF page in the selection (or `total_pages` if no subset). Single image / .docx / .xlsx = 1 credit | Runtime default since deploy `a878584d`. Matches the "1 หน้า = 1 credit" mental model users have |
+| `field_formula` (reserve) | `max(1, ceil(ocrFactor × modelMult))` where `ocrFactor = 1 + max(0, fields − 10) × 0.1` | Legacy path. Kept as reserve so admins can revert if per-page ends up under-covering AI cost after the crop pass |
+| `per_file` | Flat 1 credit per file, regardless of pages/fields | Simplest option for batch-heavy workflows |
+
+Compare pricing is **NOT** model-switchable — it always uses the field
+formula (Compare rework deferred to a future task).
+
+Charging is done through `chargeCreditsAtomic()`
+(`src/lib/credits.ts`) — a single guarded UPDATE that drains
+`credits_remaining` first then spills to `extra_credits`, returning 0 rows
+= `INSUFFICIENT_CREDITS`. Both `/api/upload` and `/api/v1/extract` share
+the helper so the two paths cannot drift.
+
+Reference: `src/lib/pricing.ts` (`CreditModel`, `DEFAULT_CREDIT_MODEL`),
+`src/lib/credits.ts`, `pm/reports/BILL-1.md`,
+`docs/CREDIT_PRICING_SUMMARY.md`.
 
 ### 4.3 Compare Workspace (2-3 docs diff)
 
@@ -154,6 +227,9 @@ Test files:
 | Admin → AI Usage | Per-model + per-function counts and tokens |  |
 | Admin → Logs | System logs paginated (LOGIN, OCR_SUCCESS, OCR_EXTRACTION_ERROR, etc.) |  |
 | Admin → Feedback | User-submitted feedback inbox |  |
+| Admin → API Settings → provider dropdown | Options include Gemini, OpenAI, OpenRouter, and **Vertex AI (Express)**. Vertex uses `x-goog-api-key` header + global endpoint (no OAuth / service-account) | Routing option only — no change to OCR extraction semantics. See `pm/reports/AI-1.md` |
+| Admin → API Settings → load form | Stored keys return **masked** (`AIzaXX....XXXX`) for every provider. Submitting the form without editing the key preserves the stored value (mask marker = "keep existing"); pasting a new key overrides | Applies to Gemini + Vertex + OpenAI + OpenRouter uniformly |
+| Admin → API Settings → "Test" button per config | `POST /api/admin/settings/test` with just `{ id }`; server loads the key, runs a 1-token probe, returns success/`AI_FAILED` only. Plaintext key never touches the browser | New endpoint from AI-1 |
 
 ### 4.8 Public API (`/api/v1/extract`)
 
