@@ -30,6 +30,7 @@ export const ErrorCode = {
 
     // ── Domain ──
     AI_FAILED: "AI_FAILED",
+    AI_QUOTA: "AI_QUOTA",
     AI_UNAVAILABLE: "AI_UNAVAILABLE",
     UPLOAD_FAILED: "UPLOAD_FAILED",
     PROCESSING_FAILED: "PROCESSING_FAILED",
@@ -62,6 +63,10 @@ export const STATUS_FOR_CODE: Partial<Record<ErrorCodeT, number>> = {
     INVALID_FORMAT: 400,
     TOO_MANY_PAGES: 400,
     AI_FAILED: 502,
+    // API-4b: 429 signals the provider is quota-throttled — surface as
+    // Too Many Requests so callers (and their retry logic) can distinguish
+    // a transient exhaustion from a hard AI failure.
+    AI_QUOTA: 429,
     AI_UNAVAILABLE: 503,
     UPLOAD_FAILED: 500,
     PROCESSING_FAILED: 500,

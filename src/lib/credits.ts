@@ -57,3 +57,48 @@ export async function chargeCreditsAtomic(
     if (!charged) return { ok: false };
     return { ok: true, remaining: charged.remaining };
 }
+
+/**
+ * Atomically REFUND `amount` credits to a user (API-4b).
+ *
+ * Called when an AI-provider-side failure prevents the operation the caller
+ * already charged for — every failed curl was burning credits before this
+ * existed (UAT 2026-07-12). Mirrors `chargeCreditsAtomic`'s single-statement
+ * shape so parallel refunds can't race.
+ *
+ * Contract:
+ *   - Refund lands entirely in `credits_remaining`. Even if the original
+ *     charge partially drained from `extra_credits`, we don't try to "undo
+ *     the split" — that would need per-charge bookkeeping we don't have.
+ *     credits_remaining is the monthly-topup bucket, so tilting refunds
+ *     toward it is more generous, not less, to the caller. Acceptable
+ *     for the AI-failure edge case.
+ *   - `amount ≤ 0` is a no-op (returns ok:true without touching the row)
+ *     to match `chargeCreditsAtomic`'s guard shape.
+ *   - No schema changes — refund is logged to console with `[REFUND]`
+ *     prefix by the caller. A dedicated `credit_refunds` table is a future
+ *     enhancement (see pm/reports/API-4b.md).
+ *
+ * ONLY call this on AI-provider-side failures (429/quota/network/timeout).
+ * Do NOT call for user errors (invalid params, size guard, missing fields)
+ * — those never charged in the first place because size + validation happen
+ * BEFORE `chargeCreditsAtomic` in both /api/upload and /api/v1/extract.
+ */
+export async function refundCreditsAtomic(
+    env: any,
+    userId: string,
+    amount: number,
+): Promise<ChargeResult> {
+    if (!env?.DB) return { ok: false };
+    if (!userId) return { ok: false };
+    if (!Number.isFinite(amount) || amount <= 0) {
+        return { ok: true };
+    }
+    const refunded: any = await env.DB.prepare(
+        `UPDATE users SET credits_remaining = credits_remaining + ?1
+         WHERE id = ?2
+         RETURNING credits_remaining + extra_credits AS remaining`
+    ).bind(amount, userId).first();
+    if (!refunded) return { ok: false };
+    return { ok: true, remaining: refunded.remaining };
+}

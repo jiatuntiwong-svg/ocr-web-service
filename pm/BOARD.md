@@ -25,7 +25,7 @@
 | UI-4b | Implement workspace v3 หลัง flag `ocrWorkspaceV2` | frontend-ui | 🟡 P1 | ✅ done (PM approved, flag OFF — deploy ปลอดภัย) — **ห้ามเปิด flag ON จนกว่า UI-4c ผ่าน** | — |
 | UI-4c | Flag-ON punch list + UAT findings ×5 รอบ | frontend-ui | 🟡 P1 | ✅ done (PM approved 2026-07-11) — §3a-e ครบ, deploy ทั้งหมด, v2 workspace flag ON stable ใน prod | — |
 | UI-7 | Batch flow ในสไตล์ v2 (แทน stopgap ที่เปิด UI เดิม) | frontend-ui | ⚪ backlog | ⏳ รอ operator ตัดสิน priority | UI-4c |
-| API-4 | Backend full-doc mode: อ่าน `mode=fulldoc` + verbatim_transcribe profile + `{pages:[...]}` shape | backend-api + ocr-pipeline | 🟡 P1 | ⏳ todo (Sprint 2 — มัดรวม S2-2 prompt profiles) | S2-2 |
+| API-4 | Backend full-doc mode (`mode=fulldoc` + `{pages:[...]}`) | backend-api + ocr-pipeline | 🟡 P1 | ✅ done — curl UAT ผ่านจริง 2026-07-13 (PO ไทยถอดครบหน้า 3.2s, contract ตรง spec) | — |
 | UI-5 | ⚡ Quick mode — ข้าม step ที่มี default | frontend-ui | 🟢 P2 | ✅ done — ship รวมกับ UI-6 (verified: OCRWorkspaceV2:387 auto-advance + credit-confirm ไม่ถูก bypass) | — |
 | UI-6 | Template UX: picker (⭐/🕐/📋) + save semantics + delete + Quick mode | frontend-ui | 🟡 P1 | ✅ done — deploy `a878584d` + docs-manager verify ใน code แล้ว (BEHAVIOR_REFERENCE §4.2) | — |
 | AI-1 | รองรับ Vertex AI key (express mode) + 🔒 security gate | ocr-pipeline | 🔴 P0 🔥 | ✅ done — security 2 ชั้นผ่าน, user เทสจริง + deploy แล้ว 2026-07-09 | — |
@@ -40,6 +40,12 @@
 สถานะ: ⏳ todo → 🔨 in progress → 👀 review → ✅ done | 🚫 blocked
 
 ## Decision log
+
+- 2026-07-13: **🏆 OCR-8b Rung 3 SUCCESS + benchmark 100%** — deploy `fb169356` (OCR-8b dual-scale + API-4b defects 1-4 + BILL-1b + MIME normalize). Batched benchmark: thai-form 9/9, dense 6/6, tables 6/6, multi-column 12/12, **landscape 3/3** → 36/36 = 100% (+11.1% vs baseline). Runner `context.clearCookies()` fix for `/login`→`/dashboard` auto-redirect race (S2-1b addendum). 4 rows ✅ done: OCR-8, OCR-8b, API-4b, S2-1b
+
+- 2026-07-12: **OCR-8b Rung 3 landed (review)** — dual-scale crop reconciliation (hi 7200 + lo 3600 per hinted field, `layout_scan` scaleGroups, shared rules v2 with multi-scale rule using `รับบริจาค`/`บริการ` as concrete example). Rung 2 skipped by evidence (deterministic miss + prior board decision "retry ช่วย deterministic ไม่ได้"); curl-gate command documented in `pm/reports/OCR-8b.md` for optional PM validation. `ENABLE_DUAL_SCALE_CROPS = true` (rollback = flip false, 1 deploy). Awaiting benchmark rerun.
+- 2026-07-12: **OCR-8 Rung 1 (DPI 2×) NOT met** — deploy `af88c60e`, benchmark = 88.9% (same as baseline), landscape-a4-widefield ยัง 0/3 same missing line. No regression on 11 passing cases. 3 hypotheses: font render ceiling, model preference for "บริการ" bigram, or server-side resize. Next: open **OCR-8b** for Rung 2 (retry-at-0.6 value-shift) → Rung 3 (dual-scale + shared rules bump)
+- 2026-07-12: **API-4 deployed** `af88c60e` — fulldoc mode routes to verbatim_transcribe profile; response `{pages:[{page,text}]}`; per-page credit charge; BC preserved for field mode. Awaiting curl UAT per `pm/reports/API-4.md`
 
 - 2026-07-05: OCR-1 static review = NO-GO เบื้องต้น → อนุมัติ quick fix (OCR-4) ก่อน, user จะรันเทสจริง 18-run หลัง OCR-4 เสร็จ, **ยังไม่อนุมัติ two-pass extraction**
 - 2026-07-05: Public API v1/extract ยังไม่มีผู้ใช้ → bbox_hint support ใน v1/extract ลง backlog (ไม่ทำ sprint นี้)
@@ -74,7 +80,14 @@
 | ลำดับ | งาน | ที่มา | สถานะ | เงื่อนไข |
 |---|---|---|---|---|
 | S2-1 | ขยาย OCR-2 เป็น benchmark-style suite (หมวด: Thai form, dense, landscape, tables, multi-column) | Techniques §3 + scaffold เดิม | ✅ done — **baseline locked 2026-07-12: 88.9% run-level, 91.7% case-level** (32/36 runs, 11/12 cases). thai-form/multi-column/tables 100%, dense 83% (1 harness timeout), landscape 0% (real AI omission → hands S2-2 evidence). Baseline snapshot at `pm/reports/OCR-2-runs/_baseline.json`; report `pm/reports/S2-1.md` §Baseline | ไม่มีความเสี่ยง — ทำก่อนทุกข้อ เป็น safety gate |
-| S2-2 | Shared prompt rule block + prompt profiles (extract/verbatim/layout/compare) | Techniques §2 — แก้ root cause class OCR-6b | 👀 review — module + wiring + flag landed; deploy `836d86ae`; benchmark = **88.9% (equal to baseline)**, no regression on 11 passing cases. Landscape ยัง 0/3 — vision-side issue ไม่ใช่ prompt gap (AI ไม่ report เป็น correction ด้วย). Handoff → S2-2b (DPI bump / retry / re-crop). ดู `pm/reports/S2-2.md` §Landscape verdict | Prompt versioned; ⚠️ landscape acceptance ยังไม่ผ่าน — งานถัดไป S2-2b |
+| S2-2 | Shared prompt rule block + prompt profiles | Techniques §2 | ✅ done (PM approved 2026-07-12) — no regression, dense ⬆100%, ปลดล็อก API-4; landscape พิสูจน์เป็น vision-side → แยกเป็น **OCR-8** (acceptance ≥2/3 ย้ายตาม); layoutScan เก็บไว้รอ S2-5; เฝ้า token cost crop pass | — |
+| OCR-8 | Crop legibility: DPI bump → retry-assist → dual-scale (แก้ landscape "รับบริจาค" drop) + fix harness timeout flake | S2-2 handoff | ✅ done — Rung 1 (DPI 2×) เดี่ยวไม่พอ (0/3) แต่ stack กับ OCR-8b Rung 3 → landscape 3/3 ✅ (deploy `fb169356` benchmark 2026-07-13) | — |
+| API-5 | Public self-service OCR API: API keys (hashed) + template_id parity + rate limit + docs + security gate | operator request 2026-07-12 + G5b | ⏳ todo (phase ถัดจาก OCR track) — spec ใน tasks/backend-api.md, ~1 sprint | OCR-8, API-4 |
+| BILL-1b | 🔥 hotfix: server estimate ใช้ active credit model | พบโดย API-4 §8.2 | ✅ done (PM approved) — deploy + benchmark ยืนยัน 0 regression (content-level 91.7% = baseline) | — |
+| OCR-8b | Landscape Rung 2 (retry-at-0.6) → Rung 3 (dual-scale) — Rung 1 DPI 2× พิสูจน์แล้วว่าไม่พอ (0/3) | OCR-8 ladder | ✅ done — **landscape-a4-widefield 3/3 PASS** (deploy `fb169356`, benchmark 2026-07-13). Rung 3 dual-scale (7200+3600) + shared rules v2 multi-scale rule → "รับบริจาค" ถูกอ่านครบ. Rung 2 skipped. Overall 36/36 = 100% (+11.1% vs baseline) | S2-1b |
+| S2-1b | Harness robustness: waitForSelector + retry-on-flake + runner cookie-clear (auto-redirect fix) | benchmark 2026-07-12 | ✅ done — batch pattern proven (3 batches × ≤ 5 case each = 0 flake); harness login retry + upload signal-based wait + runner `context.clearCookies()` เพื่อกันซ้ำ /login → /dashboard redirect. Report `pm/reports/S2-1b.md` | — |
+| S2-1c | Batched baseline tooling: `merge-summaries.mjs` + `--delay-ms` flag + README batched-baseline procedure | S2-1b handoff | 👀 review — scaffold only, no deploy/benchmark. Smoke merge of 5 existing 2026-07-13 batch summaries → 12/12 scored 100% (thai-form 3/3, dense 2/2, multi-column 4/4, tables 2/2, landscape 1/1; landscape-sibling-labels fixture gitignored → skipped). PM overwrites `_baseline.json` in next step. Report `pm/reports/S2-1c.md` | S2-1b |
+| API-4b | v1/extract AI-failure handling (AI_QUOTA + refund + config fallback + MIME normalization) | UAT curl | ✅ done — defect 1-3 verified บน prod จริง; item 4 (MIME normalization) deploy `fb169356` + benchmark 100% (BC preserved). ดู `pm/reports/API-4b.md` + `pm/reports/API-4b-item4.md` | — |
 | S2-3 | UI-4b implement (progressive disclosure ตาม mockup) + keyboard review mode | UI ideas §1, §5 | ⏳ todo | หลัง mockup UI-4 ผ่าน review |
 | S2-4 | Per-page parallel pipeline หลัง flag `OCR_PIPELINE_MODE` | Techniques §1 | ⏳ todo | ต้อง S2-1 เขียว + path ใหม่คู่ path เดิม ห้าม refactor ทับ + redesign ร่วม field-crops |
 | S2-5 | Page strip ถาวร + click-sync overlay | UI ideas §3, §2 | ⏳ todo | ต่อยอด UI-1; overlay ระวังพิกัด (class OCR-6c) |

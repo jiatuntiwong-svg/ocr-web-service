@@ -1,0 +1,195 @@
+{
+  "suite": "OCR-2-benchmark",
+  "startedAt": "2026-07-14T04-05-36-577Z",
+  "baseUrl": "https://ocr-web-service.jiatuntiwong.workers.dev/",
+  "config": "scripts\\ocr-regression\\cases\\benchmark.json",
+  "scoring": {
+    "overall": 1,
+    "perCategory": {
+      "thai-form": {
+        "cases": 3,
+        "passRate": 1,
+        "meetsThreshold": 1
+      },
+      "dense": {
+        "cases": 2,
+        "passRate": 1,
+        "meetsThreshold": 1
+      },
+      "multi-column": {
+        "cases": 4,
+        "passRate": 1,
+        "meetsThreshold": 1
+      },
+      "tables": {
+        "cases": 2,
+        "passRate": 1,
+        "meetsThreshold": 1
+      },
+      "landscape": {
+        "cases": 1,
+        "passRate": 1,
+        "meetsThreshold": 1
+      }
+    },
+    "casesRun": 12
+  },
+  "delta": null,
+  "previousSummary": null,
+  "cases": [
+    {
+      "id": "multiline-join",
+      "category": "thai-form",
+      "skipped": false,
+      "skipReason": null,
+      "runs": 3,
+      "passRate": 1,
+      "minPassRate": 0.8,
+      "meetsThreshold": true
+    },
+    {
+      "id": "prefix-retention",
+      "category": "thai-form",
+      "skipped": false,
+      "skipReason": null,
+      "runs": 3,
+      "passRate": 1,
+      "minPassRate": 0.8,
+      "meetsThreshold": true
+    },
+    {
+      "id": "thai-dense-multiline-repro",
+      "category": "thai-form",
+      "skipped": false,
+      "skipReason": null,
+      "runs": 3,
+      "passRate": 1,
+      "minPassRate": 0.7,
+      "meetsThreshold": true
+    },
+    {
+      "id": "dense-22-row-table",
+      "category": "dense",
+      "skipped": false,
+      "skipReason": null,
+      "runs": 3,
+      "passRate": 1,
+      "minPassRate": 0.7,
+      "meetsThreshold": true
+    },
+    {
+      "id": "dense-sibling-blend",
+      "category": "dense",
+      "skipped": false,
+      "skipReason": null,
+      "runs": 3,
+      "passRate": 1,
+      "minPassRate": 0.7,
+      "meetsThreshold": true
+    },
+    {
+      "id": "column-disambiguation",
+      "category": "multi-column",
+      "skipped": false,
+      "skipReason": null,
+      "runs": 3,
+      "passRate": 1,
+      "minPassRate": 0.8,
+      "meetsThreshold": true
+    },
+    {
+      "id": "multicolumn-2col-thai",
+      "category": "multi-column",
+      "skipped": false,
+      "skipReason": null,
+      "runs": 3,
+      "passRate": 1,
+      "minPassRate": 0.8,
+      "meetsThreshold": true
+    },
+    {
+      "id": "verbatim-plastelet",
+      "category": "multi-column",
+      "skipped": false,
+      "skipReason": null,
+      "runs": 3,
+      "passRate": 1,
+      "minPassRate": 0.8,
+      "meetsThreshold": true
+    },
+    {
+      "id": "corrections-recieve",
+      "category": "multi-column",
+      "skipped": false,
+      "skipReason": null,
+      "runs": 3,
+      "passRate": 1,
+      "minPassRate": 0.8,
+      "meetsThreshold": true
+    },
+    {
+      "id": "tables-3col-inventory",
+      "category": "tables",
+      "skipped": false,
+      "skipReason": null,
+      "runs": 3,
+      "passRate": 1,
+      "minPassRate": 0.7,
+      "meetsThreshold": true
+    },
+    {
+      "id": "tables-rowheader-summary",
+      "category": "tables",
+      "skipped": false,
+      "skipReason": null,
+      "runs": 3,
+      "passRate": 1,
+      "minPassRate": 0.7,
+      "meetsThreshold": true
+    },
+    {
+      "id": "landscape-sibling-labels",
+      "category": "landscape",
+      "skipped": true,
+      "skipReason": "fixture file absent",
+      "runs": 0,
+      "passRate": 0,
+      "minPassRate": 0.8,
+      "meetsThreshold": false
+    },
+    {
+      "id": "landscape-a4-widefield",
+      "category": "landscape",
+      "skipped": false,
+      "skipReason": null,
+      "runs": 3,
+      "passRate": 1,
+      "minPassRate": 0.8,
+      "meetsThreshold": true
+    }
+  ],
+  "synthetic": true,
+  "syntheticSources": [
+    {
+      "path": "pm/reports/OCR-2-runs/_summary-2026-07-13T16-36-41-176Z.json",
+      "timestamp": "2026-07-13T16-36-41-176Z"
+    },
+    {
+      "path": "pm/reports/OCR-2-runs/_summary-2026-07-13T16-38-25-857Z.json",
+      "timestamp": "2026-07-13T16-38-25-857Z"
+    },
+    {
+      "path": "pm/reports/OCR-2-runs/_summary-2026-07-13T16-39-35-516Z.json",
+      "timestamp": "2026-07-13T16-39-35-516Z"
+    },
+    {
+      "path": "pm/reports/OCR-2-runs/_summary-2026-07-13T16-41-51-582Z.json",
+      "timestamp": "2026-07-13T16-41-51-582Z"
+    },
+    {
+      "path": "pm/reports/OCR-2-runs/_summary-2026-07-13T16-42-46-622Z.json",
+      "timestamp": "2026-07-13T16-42-46-622Z"
+    }
+  ],
+  "syntheticNotes": "100% synthetic baseline post OCR-8b dual-scale + API-4b; batched due to rate limit"
+}

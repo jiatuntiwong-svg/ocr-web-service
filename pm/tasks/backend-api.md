@@ -45,3 +45,36 @@ Sprint: OCR Stabilization. Update pm/BOARD.md status when you start/finish a tas
 ---
 
 **Coordinate:** retry param naming with ocr-pipeline (OCR-3); error codes list with frontend-ui (UI-3).
+
+---
+
+## API-4b (P1 🔥) — v1/extract AI-failure handling (found via UAT 2026-07-12)
+
+**Evidence:** curl fulldoc → `PROCESSING_FAILED`; wrangler tail showed the real cause: default config = depleted AI-Studio Gemini key → 429 → `generateWithAI` throws → outer catch. Three defects:
+1. **No inner try/catch around `generateWithAI`** in v1/extract → provider failures surface as meaningless `PROCESSING_FAILED`. Wrap it: map to `AI_FAILED` (or a new `AI_QUOTA` code when the provider error is 429/quota — add to errorCodes + FALLBACK_MESSAGE + i18n th/en).
+2. **Charged credits are NOT refunded when the AI call fails** — `chargeCreditsAtomic` runs before the AI call; every failed curl burned credits. Add a refund (reverse credit) in the AI-failure path on BOTH v1/extract AND verify /api/upload's runOCR failure path refunds too.
+3. **Default-config selection is fragile:** `finalConfigs[0]` may be a dead key while the UI picks a healthy one via `selectedModelId`. Improvement: try next active config (different provider) when all keys of the target fail — bounded to active configs, log which config served. Keep `modelId` param override.
+
+4. **(added 2026-07-13, found via UAT)** MIME normalization: `file.type || "image/png"` doesn't catch `application/octet-stream` (curl/scripts default) → healthy key rejected with 400. Normalize: if `file.type` is empty OR `application/octet-stream`, infer from filename extension (.png/.jpg/.jpeg/.webp/.pdf map) with `image/png` final fallback. Return `BAD_REQUEST` with a helpful message for genuinely unsupported extensions. Critical for API-5 external callers.
+
+**Acceptance:** curl fulldoc with a dead first config still succeeds via the healthy config; failures return coded errors (never PROCESSING_FAILED for AI-layer issues); failed runs refund; MIME octet-stream normalized; benchmark unaffected.
+
+---
+
+## API-5 (P1, next phase) — Public self-service OCR API (requested 2026-07-12)
+
+**Goal:** external customers call OCR via API key — full self-service SaaS surface. Supersedes the admin-only email/password auth on `/api/v1/extract`. Related backlog: PENDING_ISSUES §G5b.
+
+**Scope (phased — confirm plan with PM before coding):**
+1. **Recon:** current `/api/v1/extract` (admin-gated, email/password form parts, flat 1 credit, no hints) + any existing api-key infra ("partial exists" per G5b).
+2. **API keys:** per-user keys — generate/label/revoke in user settings UI; store HASHED (like passwords — never plaintext in D1), prefix display `sk-ocr-...xxxx`; auth via `Authorization: Bearer` header. Kill email/password auth on v1 (breaking change OK — no external users yet).
+3. **Endpoint parity:** template_id param (so external calls get hints + crop pass = same accuracy as UI), `pages`/`total_pages` (already), `mode=fulldoc` (after API-4), `retry`. Response = coded errors (already, API-2) + stable JSON shape with provenance.
+4. **Per-key rate limiting** (Workers-friendly: token bucket in D1 or Durable Object — evaluate) + per-key usage attribution in `ai_usage` + credit charge via `chargeCreditsAtomic` (already shared).
+5. **Docs page** — public API reference (endpoint, auth, params, error codes, examples) + key management UI (frontend-ui coordinate).
+6. **Security review gate** mandatory before launch (same discipline as AI-1): key hashing, no key in logs (`redactSecrets` extend for `sk-ocr-`), rate-limit bypass check, `/security-review` on the diff.
+
+**Out of scope phase 1:** webhooks (G5a), n8n/Zapier connectors (G5f), OpenAPI spec generation.
+
+**Prep item (added 2026-07-13):** root-cause the rate limit hit during benchmark batching (`wrangler tail` while reproducing — is it Workers-side or the single healthy AI-Studio key's RPM quota?). The answer feeds directly into API-5's rate-limit design AND capacity planning: if the bottleneck is one key's quota, external customers will saturate it on day one — key pool / quota increase is a launch prerequisite. Procedure documented in scripts/ocr-regression/README §Batched baseline.
+
+**Estimate:** ~1 sprint. Sequencing: after OCR-8 + API-4 close the OCR track.

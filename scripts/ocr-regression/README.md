@@ -171,6 +171,81 @@ Per case:
 5. Regenerate PDFs: `node scripts/ocr-regression/generate-fixtures.mjs --category <cat>`.
 6. Smoke-check: `node scripts/ocr-regression/smoke-config.mjs scripts/ocr-regression/cases/benchmark.json` — should still say "Smoke OK." with your new case counted.
 
+## Batched baseline procedure
+
+**Why:** single-shot benchmark against prod hits a rate limit somewhere in the stack (Cloudflare Workers, the Gemini AI-Studio key, or a socket abort in between) and aborts around case 4-5 with `net::ERR_ABORTED`. Splitting the run into per-category batches with 2-3 min cooldown between batches has been proven to complete cleanly (36/36 = 100% on 2026-07-13). This section documents the workaround.
+
+### PM batching policy (2026-07-13)
+
+Choose scope by what the change touches:
+
+- **Prompt / shared rules** → run all 5 categories. Baseline rerun mandatory.
+- **Crop / rendering** → run `landscape,dense,thai-form`.
+- **Backend / billing / UI (no extraction change)** → 0-1 case sanity is enough.
+
+### Command sequence — full baseline lock
+
+```bash
+# Batch 1 — thai-form
+node scripts/ocr-regression/run.mjs \
+  --config scripts/ocr-regression/cases/benchmark.json --category thai-form --runs 3
+# Wait 2-3 min for provider cooldown
+
+# Batch 2 — dense
+node scripts/ocr-regression/run.mjs \
+  --config scripts/ocr-regression/cases/benchmark.json --category dense --runs 3
+# Wait 2-3 min
+
+# Batch 3 — tables
+node scripts/ocr-regression/run.mjs \
+  --config scripts/ocr-regression/cases/benchmark.json --category tables --runs 3
+# Wait 2-3 min
+
+# Batch 4 — multi-column
+node scripts/ocr-regression/run.mjs \
+  --config scripts/ocr-regression/cases/benchmark.json --category multi-column --runs 3
+# Wait 2-3 min
+
+# Batch 5 — landscape
+node scripts/ocr-regression/run.mjs \
+  --config scripts/ocr-regression/cases/benchmark.json --category landscape --runs 3
+
+# Merge the 5 partial summaries into one baseline snapshot
+node scripts/ocr-regression/merge-summaries.mjs \
+  --glob 'pm/reports/OCR-2-runs/_summary-<date>*.json' \
+  --output pm/reports/OCR-2-runs/_baseline.json
+```
+
+Substitute `<date>` for the ISO date prefix of your batch run (e.g. `2026-07-13T16-`) so the glob only matches the summaries produced in this session, not older files in the directory.
+
+The merged file has the same shape as an individual `_summary-*.json` (so `--fail-under` and delta tracking on the next run keep working) with three extra fields:
+
+- `synthetic: true`
+- `syntheticSources: [{ path, timestamp }, …]` — provenance
+- `syntheticNotes` — human-readable explanation
+
+Duplicate case ids across inputs are resolved by "latest timestamp wins" with a warning; conflicting `config` paths are a hard error.
+
+### In-batch pacing: `--delay-ms`
+
+If a single batch is still long enough to trip the rate limit (e.g. `--runs 10` on a 4-case category), add `--delay-ms <N>` — after each **passing** run the runner sleeps `N` ms before the next run (applied at both inter-run and inter-case boundaries; skipped after the final run and after failing runs). Default 0 keeps existing behavior byte-identical.
+
+```bash
+node scripts/ocr-regression/run.mjs \
+  --config scripts/ocr-regression/cases/benchmark.json \
+  --category dense --runs 10 --delay-ms 4000
+```
+
+### Provider bottleneck — root-cause TBD
+
+PM (2026-07-13) flagged that the rate limit could be from the depleted Google AI-Studio Gemini key rather than Cloudflare Workers itself. To investigate:
+
+```bash
+wrangler tail ocr-web-service
+```
+
+…during a stress run and look for the exact error: `429` from the provider vs a Workers CPU/subrequest cutoff vs a socket abort. **The same bottleneck will hit API-5 external SaaS callers when they burst,** so this is worth pinning down before public launch.
+
 ## Blocker section (why the suite is not running yet)
 
 S2-1 is **design + code only**. Executing the suite requires:

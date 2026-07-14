@@ -1,5 +1,20 @@
 # Work orders — ocr-pipeline agent
 
+## OCR-8 (P1, Sprint 2) — Crop legibility: landscape "รับบริจาค" drop is vision-side
+
+**Evidence:** `landscape-a4-widefield` 0/3 both pre- and post-S2-2 (prompt anti-example ignored). Model returns `ศูนย์บริการ...` with empty `corrections[]` — it does not perceive the "รับบริจาค" glyph cluster in the crop image (S2-2 report §Landscape verdict). Fixture HTML verified correct.
+
+**Experiment ladder (cheapest first — stop at the first rung that hits ≥2/3):**
+1. **DPI bump on crop:** render/crop the hint region at higher effective resolution (e.g. upscale crop 2× before sending, or crop from a higher-DPI page render for the crop pass only). Measure token cost delta.
+2. **Retry-at-0.6 assist:** if a hinted field's value changes between temp 0 and a 0.6 retry, flag low confidence (leverages OCR-3 — no new AI machinery).
+3. **Resize + re-crop pass:** send the crop at 2 scales in the same multi-image call, instruct model to reconcile.
+
+**Acceptance:** `landscape-a4-widefield` ≥ 2/3 AND full benchmark ≥ 88.9% (no green case drops). Save snapshot per SHARED_RULES version discipline. Report pm/reports/OCR-8.md.
+
+**Also in scope (harness, coordinate with qa-tester):** `verbatim-plastelet` intermittent 120s JSON-tab timeout — bump wait/robustify selector so scaffold flakes stop polluting scores.
+
+---
+
 ## AI-1 (P0 🔥 URGENT) — Support Vertex AI keys as an AI provider
 
 **Request (operator, 2026-07-09):** the AI config must accept Vertex AI credentials, alongside the existing Gemini (AI Studio key) / OpenAI / OpenRouter providers in `src/lib/ai-handler.ts`.

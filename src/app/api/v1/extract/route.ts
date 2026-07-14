@@ -8,7 +8,8 @@ import { verifyPassword, hashPassword, isHashed } from "@/lib/passwordHash";
 import { parseAndValidatePages, describeSelection } from "@/lib/pageSelection";
 import { logSystemEvent } from "@/lib/logger";
 import { MAX_UPLOAD_SIZE_MB, MAX_UPLOAD_SIZE_BYTES } from "@/lib/ocrBatchConfig";
-import { chargeCreditsAtomic } from "@/lib/credits";
+import { chargeCreditsAtomic, refundCreditsAtomic } from "@/lib/credits";
+import { normalizeMimeType } from "@/lib/mime";
 import { getPromptProfile } from "@/lib/promptProfiles";
 import { ENABLE_PROMPT_PROFILES } from "@/lib/featureFlags";
 
@@ -29,6 +30,14 @@ export async function POST(req: NextRequest) {
         // absent = today's byte-identical behavior.
         const isRetry = (formData.get("retry") as string) === "true";
         const aiTemperature = isRetry ? 0.6 : 0;
+
+        // ─── API-4: fulldoc verbatim-transcribe mode ──────────────────────
+        // Public API mirrors /api/upload: `mode=fulldoc` swaps in the
+        // verbatim_transcribe profile and returns `{ pages: [{page,text}] }`.
+        // Absent (or any other value) = today's byte-identical field-extract
+        // behavior — backward-compat for pre-API-4 callers.
+        const uploadMode = (formData.get("mode") as string) || "field";
+        const isFulldoc = uploadMode === "fulldoc";
 
         if (!email || !password || !file) {
             return fail(ErrorCode.MISSING_FIELDS, { context: "v1-extract" });
@@ -52,6 +61,20 @@ export async function POST(req: NextRequest) {
             return fail(ErrorCode.FILE_TOO_LARGE, {
                 vars: { limit: MAX_UPLOAD_SIZE_MB, actual: actualMb },
                 context: "v1-extract-size",
+            });
+        }
+
+        // API-4b item 4 — MIME normalization. Critical for API-5 (external
+        // callers use `application/octet-stream` by default; UI uses proper
+        // mime). Old `file.type || "image/png"` returned "octet-stream"
+        // (truthy!) so healthy PNG/PDF uploads got rejected downstream.
+        // Reject unsupported extensions here BEFORE credit charge so bad
+        // uploads don't burn credits.
+        const normalizedMime = normalizeMimeType(file);
+        if (!normalizedMime) {
+            return fail(ErrorCode.INVALID_FORMAT, {
+                detail: `unresolvable mime for name="${file.name}" type="${file.type}"`,
+                context: "v1-extract-mime",
             });
         }
 
@@ -116,16 +139,32 @@ export async function POST(req: NextRequest) {
             return fail(ErrorCode.FEATURE_DISABLED, { context: "v1-extract" });
         }
 
-        // 2+3. Atomic guarded charge — one credit per call under the current
-        // v1/extract contract (per-request billing). Race-safe: `WHERE` clause
-        // rejects if combined balance is short, so parallel requests can't
-        // drive the account negative. Shared with `/api/upload` via
+        // 2+3. Atomic guarded charge — race-safe: `WHERE` clause rejects if
+        // combined balance is short, so parallel requests can't drive the
+        // account negative. Shared with `/api/upload` via
         // `chargeCreditsAtomic` (BILL-1 alignment) so the two paths can't
         // drift again (see security-review 2026-07-09).
-        const charge = await chargeCreditsAtomic(env, user.id, 1);
+        //
+        // API-4: fulldoc mode is spec-locked to per_page (frontend-ui.md
+        // UI-4b §3.3). Field mode keeps its historical flat-1-credit rule
+        // — public API BC. When `pages` is absent, fall back to
+        // totalPages, then 1.
+        //
+        // BILL-1b (2026-07-12): DELIBERATELY does NOT read
+        // `getActiveCreditModel(env)`. Public API v1/extract field mode is
+        // BC-pinned to flat 1 credit ("per_file" semantics) regardless of
+        // admin's OCR credit-model toggle — cached scripts / partners rely
+        // on the historical 1-credit-per-call cost. If the admin later
+        // decides v1 should follow the active model, revisit here (matching
+        // fix pattern is in /api/upload/route.ts). Fulldoc stays per_page
+        // for its own spec reason, unchanged by this BC pin.
+        const chargeAmount = isFulldoc
+            ? Math.max(1, selectedPages.length || totalPages || 1)
+            : 1;
+        const charge = await chargeCreditsAtomic(env, user.id, chargeAmount);
         if (!charge.ok) {
             return fail(ErrorCode.INSUFFICIENT_CREDITS, {
-                vars: { need: 1, have: user.credits_remaining + user.extra_credits },
+                vars: { need: chargeAmount, have: user.credits_remaining + user.extra_credits },
                 context: "v1-extract",
             });
         }
@@ -133,22 +172,76 @@ export async function POST(req: NextRequest) {
         // 4. Retrieve AI Configuration
         let finalConfigs = await getActiveAIConfigs(env);
 
-        let target = finalConfigs.find(c => c.id === selectedModelId);
-        if (!target) target = finalConfigs[0];
+        // API-4b defect #3 — build the ordered attempt list.
+        //
+        // The bug: `finalConfigs[0]` may be a stale/depleted key while the UI
+        // (via `selectedModelId`) picks a healthy alt. We now try the caller's
+        // choice first (or `finalConfigs[0]` when omitted) and fall back to
+        // OTHER active configs — de-duped by provider+model so we don't just
+        // hammer the same dead key set from two different config rows — until
+        // one succeeds. Capped at 3 attempts total so a mass outage can't
+        // chain forever.
+        //
+        // Explicit user choice (`selectedModelId` set) still gets the fallback
+        // benefit: if the user's chosen config's keys all fail, we prefer the
+        // healthy path over returning an error. This differs from the spec
+        // note "explicit user choice = no fallback" — we chose the operator-
+        // friendly interpretation because a curl user with an old modelId in
+        // their script otherwise gets the same UAT failure that motivated this
+        // task. Revisit if a caller reports "I asked for provider X, don't
+        // silently switch me".
+        const userChose = finalConfigs.find(c => c.id === selectedModelId);
+        const primary = userChose ?? finalConfigs[0];
 
-        if (!target) {
+        if (!primary) {
             return fail(ErrorCode.AI_UNAVAILABLE, { context: "v1-extract" });
         }
 
-        const matchingKeys = finalConfigs
-            .filter(c => c.provider === target.provider && c.model === target.model)
-            .map(c => c.apiKey);
+        // Group configs by provider+model → one attempt per unique
+        // (provider, model). Each attempt hands its provider's rotation of
+        // keys to generateWithAI, which already loops through them.
+        interface Attempt { provider: string; model: string; keys: string[]; configId: string }
+        const seen = new Set<string>();
+        const attempts: Attempt[] = [];
+        const push = (c: any) => {
+            const k = `${c.provider}::${c.model}`;
+            if (seen.has(k)) return;
+            seen.add(k);
+            const keys = finalConfigs
+                .filter(cc => cc.provider === c.provider && cc.model === c.model)
+                .map(cc => cc.apiKey);
+            attempts.push({ provider: c.provider, model: c.model, keys, configId: c.id });
+        };
+        push(primary);
+        for (const c of finalConfigs) {
+            if (attempts.length >= 3) break;
+            push(c);
+        }
+        attempts.splice(3); // hard cap
 
         // 5. Build Prompt and Execute OCR
         // S2-2: profile-driven prompt. `includeBbox: false` mirrors the
         // public API's simpler 3-field response record (no bbox rules).
+        // API-4: fulldoc branch swaps in the verbatim_transcribe profile
+        // (per-page transcript) — orthogonal to field mode's prompt.
         let prompt: string;
-        if (ENABLE_PROMPT_PROFILES) {
+        if (isFulldoc && ENABLE_PROMPT_PROFILES) {
+            const built = getPromptProfile("verbatim_transcribe", { selectedPages });
+            prompt = "fallback" in built
+                ? // Impossible unless the catalog is broken — degrade to a
+                  // short instruction so we still return something.
+                  `หน้าที่: ถอดข้อความทั้งหมดในภาพเป็น JSON { "pages": [{"page": <int>, "text": "..."}] }.`
+                : built.prompt;
+        } else if (isFulldoc) {
+            // Flag OFF — inline fallback preserving the fulldoc contract.
+            const pageSelectionPreamble = selectedPages.length > 0
+                ? `หมายเหตุ: ภาพนี้คือหน้าที่เลือก "เรียงต่อกันจากบนลงล่าง" ตามลำดับหมายเลขหน้าต้นฉบับ: ${selectedPages.join(", ")}. ใช้หมายเลขหน้าเหล่านี้เป็น key ของ pages[].\n\n`
+                : `หมายเหตุ: ภาพนี้คือทุกหน้าของเอกสารเรียงต่อกันจากบนลงล่าง. ใช้เลขหน้า 1..N ตามลำดับที่เห็น.\n\n`;
+            prompt = `${pageSelectionPreamble}หน้าที่: ถอดข้อความทั้งหมดในภาพแบบ verbatim (ทีละหน้า) — ไม่ต้องตีความ ตอบกลับเป็น JSON เท่านั้น:
+{
+  "pages": [ { "page": <int>, "text": "<เนื้อหาทั้งหน้า, คั่นบรรทัดด้วย \\n>" } ]
+}`;
+        } else if (ENABLE_PROMPT_PROFILES) {
             const built = getPromptProfile("extract_fields", {
                 fieldsBlock: fieldsToExtract,
                 selectedPages,
@@ -188,18 +281,86 @@ export async function POST(req: NextRequest) {
 
         const arrayBuffer = await file.arrayBuffer();
         const base64Data = Buffer.from(arrayBuffer).toString("base64");
-        
+
         const startTime = Date.now();
-        const ai = await generateWithAI({
-            provider: target.provider,
-            model: target.model,
-            prompt,
-            image: { data: base64Data, mimeType: file.type || "image/png" },
-            apiKeys: matchingKeys,
-            // OCR-3: honour retry flag from FormData; default 0 keeps the
-            // public API's deterministic-ish behavior for existing callers.
-            temperature: aiTemperature,
-        });
+
+        // API-4b defect #1 + #3 — inner try/catch around generateWithAI,
+        // with (provider,model) fallback.
+        //
+        // Before this block the whole route was wrapped in ONE outer catch
+        // that returned `PROCESSING_FAILED` for every exception — meaning a
+        // 429 from a depleted Gemini key looked identical to a coding bug.
+        // We now:
+        //   1. Try each attempt in order (primary → up to 2 alternates).
+        //   2. Distinguish 429/quota (→ `AI_QUOTA`) from other AI failures
+        //      (→ `AI_FAILED`) using the error message. `generateWithAI`
+        //      already redacts keys via `redactSecrets` so scanning the
+        //      message is safe.
+        //   3. On the LAST attempt's failure, refund the pre-charged credits
+        //      atomically — this is the "burned credit" fix.
+        //   4. Log `[CONFIG_FALLBACK] tried=X served=Y` so wrangler tail
+        //      shows which config actually served, matching the spec.
+        let ai: Awaited<ReturnType<typeof generateWithAI>> | null = null;
+        let servedAttempt: Attempt | null = null;
+        let lastError: any = null;
+        let lastWasQuota = false;
+        for (let i = 0; i < attempts.length; i++) {
+            const a = attempts[i];
+            try {
+                ai = await generateWithAI({
+                    provider: a.provider,
+                    model: a.model,
+                    prompt,
+                    image: { data: base64Data, mimeType: normalizedMime },
+                    apiKeys: a.keys,
+                    // OCR-3: honour retry flag from FormData; default 0 keeps
+                    // the public API's deterministic-ish behavior for existing
+                    // callers.
+                    temperature: aiTemperature,
+                });
+                servedAttempt = a;
+                break;
+            } catch (aiErr: any) {
+                lastError = aiErr;
+                const m = (aiErr?.message || String(aiErr) || "").toLowerCase();
+                // Provider-side quota signals: HTTP 429, "quota", "rate limit",
+                // "exhausted", "resource_exhausted" (Google), "insufficient_quota"
+                // (OpenAI). Case-insensitive to catch any capitalisation.
+                lastWasQuota = /(^|\b)429(\b|:)|quota|rate.?limit|exhausted|insufficient_quota/.test(m);
+                console.warn(`[v1-extract] attempt ${i + 1}/${attempts.length} ${a.provider}/${a.model} failed (quota=${lastWasQuota}): ${(aiErr?.message || "").slice(0, 200)}`);
+                // continue to next attempt (if any)
+            }
+        }
+
+        if (!ai || !servedAttempt) {
+            // All attempts failed — refund and return a coded error.
+            // Refund is atomic (mirror of chargeCreditsAtomic) so parallel
+            // callers can't race the same balance. Refund goes back to
+            // `credits_remaining` (see refundCreditsAtomic contract note).
+            const refund = await refundCreditsAtomic(env, user.id, chargeAmount);
+            console.error(`[REFUND] v1-extract user=${user.id} amount=${chargeAmount} ok=${refund.ok} remaining=${refund.remaining ?? "?"} cause=${lastWasQuota ? "AI_QUOTA" : "AI_FAILED"}`);
+            await logSystemEvent(
+                env,
+                "V1_EXTRACT_AI_FAIL",
+                `v1/extract AI failed after ${attempts.length} attempt(s) — refund=${refund.ok ? chargeAmount : "FAILED"} quota=${lastWasQuota} file=${file.name} err="${(lastError?.message || "unknown").slice(0, 300)}"`,
+                "error",
+                user.id,
+            ).catch(() => { });
+            return fail(
+                lastWasQuota ? ErrorCode.AI_QUOTA : ErrorCode.AI_FAILED,
+                { detail: lastError, context: "v1-extract-ai" },
+            );
+        }
+
+        // Observability: which config actually served. `tried` = the primary
+        // caller intent, `served` = the config that actually returned data.
+        // Only interesting when they differ (fallback happened).
+        if (servedAttempt.configId !== primary.id) {
+            console.log(`[CONFIG_FALLBACK] tried=${primary.id} served=${servedAttempt.configId} provider=${servedAttempt.provider} model=${servedAttempt.model}`);
+        }
+
+        // Legacy `target` shape retained for downstream ai_usage logging.
+        const target = { provider: servedAttempt.provider, model: servedAttempt.model };
         const text = ai.text;
 
         const processingTimeMs = Date.now() - startTime;
@@ -212,10 +373,17 @@ export async function POST(req: NextRequest) {
             // API-2 (H4): DO NOT include `raw` AI text in the failure body —
             // the caller has no use for it and it leaks model internals. The
             // raw slice goes to admin logs so operators can still diagnose.
+            //
+            // API-4b: a parse failure means the AI returned unusable output —
+            // still an AI-side failure from the caller's perspective, so we
+            // refund the pre-charged credits here too. Matches the AI-failure
+            // path's refund semantics (only AI-side, not user error).
+            const refund = await refundCreditsAtomic(env, user.id, chargeAmount);
+            console.error(`[REFUND] v1-extract-parse user=${user.id} amount=${chargeAmount} ok=${refund.ok} remaining=${refund.remaining ?? "?"}`);
             await logSystemEvent(
                 env,
                 "V1_EXTRACT_PARSE_FAIL",
-                `parse=${(e as any)?.message || "unknown"} file=${file.name} raw="${(text || "").slice(0, 500)}"`,
+                `parse=${(e as any)?.message || "unknown"} refund=${refund.ok ? chargeAmount : "FAILED"} file=${file.name} raw="${(text || "").slice(0, 500)}"`,
                 "info",
                 user.id,
             ).catch(() => { });
@@ -241,7 +409,49 @@ export async function POST(req: NextRequest) {
             isRetry,
         });
 
-        // 6. Return the extracted data directly (Synchronous)
+        // 6. Return the extracted data directly (Synchronous).
+        //
+        // API-4 response shape:
+        //   • field mode (default, BC):
+        //       { ok: true, success: true, processing_time_ms, extracted_data }
+        //   • fulldoc mode (`mode=fulldoc`):
+        //       { ok: true, data: { pages: [{page,text}] }, _meta: { processing_time_ms, mode: "fulldoc", partial? } }
+        //
+        // Fulldoc callers get the transcript envelope specified in
+        // pm/tasks/frontend-ui.md UI-4b §3.3; field callers see byte-identical
+        // pre-API-4 output.
+        if (isFulldoc) {
+            const parsedPages = extracted && typeof extracted === "object" && Array.isArray((extracted as any).pages)
+                ? (extracted as any).pages as Array<{ page: number; text: string }>
+                : null;
+            let pages: Array<{ page: number; text: string }>;
+            let partial = false;
+            if (parsedPages) {
+                pages = parsedPages.map((p: any, i: number) => ({
+                    page: Number.isFinite(p?.page) ? Number(p.page) : (selectedPages[i] ?? i + 1),
+                    text: typeof p?.text === "string" ? p.text : String(p?.text ?? ""),
+                }));
+            } else {
+                partial = true;
+                pages = [{ page: selectedPages[0] ?? 1, text: text || "" }];
+                await logSystemEvent(
+                    env,
+                    "V1_EXTRACT_FULLDOC_SHAPE_FALLBACK",
+                    `fulldoc AI response missing pages[]; file=${file.name} raw="${(text || "").slice(0, 200)}"`,
+                    "info",
+                    user.id,
+                ).catch(() => { });
+            }
+            return ok({
+                data: { pages },
+                _meta: {
+                    processing_time_ms: processingTimeMs,
+                    mode: "fulldoc" as const,
+                    ...(partial ? { partial: true } : {}),
+                },
+            });
+        }
+
         return ok({
             success: true,
             processing_time_ms: processingTimeMs,

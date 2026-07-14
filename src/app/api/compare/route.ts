@@ -12,6 +12,7 @@ import { requireUser, ensureCanActAs } from "@/lib/auth/guards";
 // Semantic normalisation for diff verdicts — see lib/diffNormalize.ts for
 // the full ordering (date → arithmetic → numeric-with-unit → fallback).
 import { normalizeForDiff, isVerdictMode, type VerdictMode } from "@/lib/diffNormalize";
+import { normalizeMimeType } from "@/lib/mime";
 
 // NOTE: This route deliberately does NOT do OCR-token matching. The Worker
 // returns AI-extracted field values only; the browser does the matchValue→token
@@ -203,6 +204,21 @@ export async function POST(req: NextRequest) {
             return fail(ErrorCode.MISSING_FIELDS, { context: "compare" });
         }
 
+        // API-4b item 4 — normalize each file's mimeType up front. Same
+        // "octet-stream is truthy" bug as /api/upload — external callers
+        // (API-5 prep) will hit this endpoint too.
+        const normalizedMimes: string[] = [];
+        for (const f of files) {
+            const m = normalizeMimeType(f);
+            if (!m) {
+                return fail(ErrorCode.INVALID_FORMAT, {
+                    detail: `unresolvable mime for name="${f.name}" type="${f.type}"`,
+                    context: "compare-mime",
+                });
+            }
+            normalizedMimes.push(m);
+        }
+
         const selectedFieldsRaw = (formData.get("fields") as string | null) || "";
         const selectedFields = parseSelectedFields(selectedFieldsRaw);
         if (selectedFields.length === 0) {
@@ -312,9 +328,9 @@ export async function POST(req: NextRequest) {
         // ─── Call AI on cache miss ─────────────────────────────────────────
         const startTime = Date.now();
         if (!fromCache) {
-            const imagesData = files.map((file, i) => ({
+            const imagesData = files.map((_file, i) => ({
                 data: Buffer.from(fileBuffers[i]).toString("base64"),
-                mimeType: file.type || "image/jpeg",
+                mimeType: normalizedMimes[i],
             }));
             const ai = await generateWithAI({
                 provider: target.provider,

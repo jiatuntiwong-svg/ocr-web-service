@@ -21,9 +21,10 @@ import { useTranslation } from "@/lib/i18n/LocaleContext";
 import { apiError } from "@/lib/friendlyError";
 import { fetchJson } from "@/lib/fetchJson";
 import { ErrorCode } from "@/lib/errorCodes";
-import { pdfFileToImageDetailed, type PdfRasterResult, type StackedPageRect } from "@/lib/pdf-to-image";
+import { pdfFileToImageDetailed, type PdfRasterResult, type StackedPageRect, DEFAULT_TARGET_LONG_EDGE } from "@/lib/pdf-to-image";
 import { docxFileToImage } from "@/lib/docx-to-image";
-import { buildFieldCrops } from "@/lib/field-crops";
+import { buildFieldCrops, CROP_DPI_SCALE, interleaveDualScaleCrops } from "@/lib/field-crops";
+import { ENABLE_DUAL_SCALE_CROPS } from "@/lib/featureFlags";
 import { estimateCredits, creditTone, type CreditModel, DEFAULT_CREDIT_MODEL } from "@/lib/pricing";
 import { exportOCRResult } from "@/lib/exportUtils";
 import { PAGE_SELECTION_MAX } from "@/lib/ocrBatchConfig";
@@ -543,12 +544,14 @@ export default function OCRWorkspaceV2({ user, balance = 0, onDocumentProcessed,
     // ─── Upload plumbing ──────────────────────────────────────────────────
     const prepareUploadWithCrops = useCallback(async (
         source: File, selection?: number[],
-    ): Promise<{ uploadFile: File; crops: any[]; renderedPages: number[]; totalPages: number | null; }> => {
+    ): Promise<{ uploadFile: File; crops: any[]; renderedPages: number[]; totalPages: number | null; cropDpiScale: number; }> => {
         let uploadFile: File = source;
         let pageRects: StackedPageRect[] | null = null;
         let renderedPages: number[] = [];
         let totalPages: number | null = null;
+        let isPdf = false;
         if (source.type === "application/pdf") {
+            isPdf = true;
             try {
                 const cached = pdfRaster && pdfRaster.sourceFile === source ? pdfRaster.result : null;
                 totalPages = cached ? cached.pageNumbers.length : null;
@@ -565,11 +568,59 @@ export default function OCRWorkspaceV2({ user, balance = 0, onDocumentProcessed,
             } catch (e) { console.error("[v2] pdf convert failed", e); }
         }
         let crops: any[] = [];
+        let cropDpiScale = 1;
         if (extractFields.some(f => f.bbox_hint)) {
-            try { crops = await buildFieldCrops(uploadFile, extractFields, pageRects, renderedPages); }
+            // OCR-8 Rung 1 — DPI bump on crop pass.
+            //
+            // The whole-image call still consumes the standard 3600px raster
+            // (unchanged upload cost). For the crop pass we re-rasterize the
+            // rendered pages at CROP_DPI_SCALE× (default 2×) so each crop
+            // tile carries ~4× the pixel information — enough for Gemini to
+            // resolve small Thai glyph clusters that failed at 300 DPI
+            // (`landscape-a4-widefield` "รับบริจาค" case, S2-2 report).
+            // Only PDFs get the higher-DPI re-render; images/docx keep the
+            // input's native resolution because we cannot recover pixels
+            // beyond what the caller supplied (upscaling adds no signal).
+            let cropSourceFile: File = uploadFile;
+            let cropPageRects: StackedPageRect[] | null = pageRects;
+            if (isPdf && CROP_DPI_SCALE > 1) {
+                try {
+                    const hiRes = await pdfFileToImageDetailed(source, {
+                        pages: renderedPages.length > 0 ? renderedPages : undefined,
+                        targetLongEdge: DEFAULT_TARGET_LONG_EDGE * CROP_DPI_SCALE,
+                        // Base A4 longEdge ≈ 842pt → default cap 4 clamps to
+                        // ~3368px, never reaching a 7200px target. Bump the
+                        // cap so the higher DPI actually renders.
+                        maxScale: Math.max(4, 4 * CROP_DPI_SCALE),
+                    });
+                    cropSourceFile = hiRes.file;
+                    cropPageRects = hiRes.pageRects;
+                    cropDpiScale = CROP_DPI_SCALE;
+                } catch (e) {
+                    console.warn("[v2] hi-DPI crop render failed, falling back to standard DPI", e);
+                    cropDpiScale = 1;
+                }
+            }
+            try { crops = await buildFieldCrops(cropSourceFile, extractFields, cropPageRects, renderedPages); }
             catch (e) { console.warn("[v2] crop build failed", e); crops = []; }
+
+            // OCR-8b Rung 3 — dual-scale reconciliation. Also build crops
+            // from the STANDARD-DPI uploadFile (the 3600px raster that goes
+            // to the whole-image call) and interleave [hi, lo] per field so
+            // the model sees each hinted region at two resolutions and can
+            // reconcile (per shared rule v2026-07-12-v2). Only meaningful
+            // when we actually rendered at higher DPI (`cropDpiScale > 1`)
+            // — otherwise both would be the same pixels.
+            if (ENABLE_DUAL_SCALE_CROPS && cropDpiScale > 1 && crops.length > 0) {
+                try {
+                    const loCrops = await buildFieldCrops(uploadFile, extractFields, pageRects, renderedPages);
+                    if (loCrops.length > 0) crops = interleaveDualScaleCrops(crops, loCrops);
+                } catch (e) {
+                    console.warn("[v2] lo-DPI crop build failed, keeping hi-only crops", e);
+                }
+            }
         }
-        return { uploadFile, crops, renderedPages, totalPages };
+        return { uploadFile, crops, renderedPages, totalPages, cropDpiScale };
     }, [extractFields, pdfRaster]);
 
     const runExtract = useCallback(async (isRetry: boolean) => {
@@ -577,7 +628,7 @@ export default function OCRWorkspaceV2({ user, balance = 0, onDocumentProcessed,
         setLoading(true); setResult(null); setFulldocResult(null); setError(null);
         setProgress(15);
         try {
-            const { uploadFile, crops, renderedPages, totalPages } = await prepareUploadWithCrops(file, selectedPages);
+            const { uploadFile, crops, renderedPages, totalPages, cropDpiScale } = await prepareUploadWithCrops(file, selectedPages);
             const fd = new FormData();
             fd.append("file", uploadFile);
             if (user) fd.append("userId", user.id);
@@ -597,8 +648,20 @@ export default function OCRWorkspaceV2({ user, balance = 0, onDocumentProcessed,
                 fd.append("fields_json", JSON.stringify(extractFields));
                 if (crops.length > 0) {
                     fd.append("field_crops", JSON.stringify(
-                        crops.map((c, i) => ({ index: i, fieldName: c.fieldName, page: c.page }))
+                        crops.map((c, i) => ({
+                            index: i,
+                            fieldName: c.fieldName,
+                            page: c.page,
+                            bytes: c.bytes ?? null,
+                            // OCR-8b Rung 3: "hi" | "lo" | undefined (single-scale).
+                            // Server groups by fieldName + scale order.
+                            scale: c.scale ?? null,
+                        }))
                     ));
+                    // OCR-8 telemetry: report the DPI multiplier used for
+                    // the crop pass so the server can log `_crop_dpi` +
+                    // `_crop_bytes` on raw_json without inferring anything.
+                    fd.append("crop_dpi_scale", String(cropDpiScale));
                     crops.forEach((c, i) => fd.append(`crop_${i}`, new File([c.blob], `crop_${i}.png`, { type: "image/png" })));
                 }
             }

@@ -5,7 +5,7 @@ import { logSystemEvent } from "@/lib/logger";
 import { logAiUsage } from "@/lib/ai-usage";
 import { loadFeatureFlags, isFeatureEnabled } from "@/lib/tier-config";
 import { RETENTION_LIMITS } from "@/lib/devUsers";
-import { estimateCredits } from "@/lib/pricing";
+import { estimateCredits, getActiveCreditModel } from "@/lib/pricing";
 import { parseExcel, workbookToPromptText, isExcelFile } from "@/lib/excel-parser";
 import { ok, fail, ErrorCode } from "@/lib/apiResponse";
 import { createNotification } from "@/lib/notifications";
@@ -14,8 +14,15 @@ import { parseAndValidatePages, describeSelection } from "@/lib/pageSelection";
 import { normalizeFieldNameKey } from "@/lib/field-crops";
 import { MAX_UPLOAD_SIZE_MB, MAX_UPLOAD_SIZE_BYTES } from "@/lib/ocrBatchConfig";
 import { chargeCreditsAtomic } from "@/lib/credits";
+import { normalizeMimeType } from "@/lib/mime";
 import { getPromptProfile } from "@/lib/promptProfiles";
 import { ENABLE_PROMPT_PROFILES } from "@/lib/featureFlags";
+
+/** OCR-8b Rung 3 telemetry — mirrors `DEFAULT_TARGET_LONG_EDGE` from
+ *  `pdf-to-image.ts`. Kept as a local const to avoid pulling client-only
+ *  pdfjs code into the server bundle. If either constant moves, they must
+ *  stay in sync. */
+const DEFAULT_HI_CROP_LONG_EDGE = 3600;
 
 
 export async function POST(request: NextRequest) {
@@ -104,18 +111,47 @@ export async function POST(request: NextRequest) {
     // field plus a `field_crops` manifest describing which crop_<idx> maps
     // to which fieldName + page. Absent = legacy behavior (whole-image only,
     // fully backward-compatible).
-    interface CropManifestEntry { index: number; fieldName: string; page: number }
+    interface CropManifestEntry {
+        index: number;
+        fieldName: string;
+        page: number;
+        bytes?: number | null;
+        /** OCR-8b Rung 3: "hi" | "lo" | null (single-scale). */
+        scale?: "hi" | "lo" | null;
+    }
     let cropManifest: CropManifestEntry[] = [];
     const cropsRaw = data.get("field_crops") as string | null;
     if (cropsRaw) {
         try {
             const parsed = JSON.parse(cropsRaw);
-            if (Array.isArray(parsed)) cropManifest = parsed.filter(
-                (e: any) => e && typeof e.index === "number" && typeof e.fieldName === "string"
-            );
+            if (Array.isArray(parsed)) cropManifest = parsed
+                .filter((e: any) => e && typeof e.index === "number" && typeof e.fieldName === "string")
+                .map((e: any): CropManifestEntry => ({
+                    index: e.index,
+                    fieldName: e.fieldName,
+                    page: e.page,
+                    bytes: typeof e.bytes === "number" ? e.bytes : null,
+                    scale: e.scale === "hi" || e.scale === "lo" ? e.scale : null,
+                }));
         } catch { /* malformed manifest → treat as no crops */ }
     }
-    const cropFiles: Array<{ fieldName: string; page: number; buffer: ArrayBuffer; mimeType: string }> = [];
+    // OCR-8: DPI multiplier reported by the client for the crop pass. Purely
+    // observational — the server does not act on it, only records it to
+    // raw_json (`_crop_meta`) so cost/quality trade-offs can be tracked per
+    // run. Default 1 keeps legacy clients untouched.
+    let cropDpiScale = 1;
+    const cropDpiRaw = data.get("crop_dpi_scale");
+    if (typeof cropDpiRaw === "string") {
+        const n = Number(cropDpiRaw);
+        if (Number.isFinite(n) && n > 0) cropDpiScale = n;
+    }
+    const cropFiles: Array<{
+        fieldName: string;
+        page: number;
+        buffer: ArrayBuffer;
+        mimeType: string;
+        scale?: "hi" | "lo" | null;
+    }> = [];
     for (const m of cropManifest) {
         const f = data.get(`crop_${m.index}`) as unknown as File | null;
         if (!f) continue;
@@ -124,7 +160,12 @@ export async function POST(request: NextRequest) {
                 fieldName: m.fieldName,
                 page: m.page,
                 buffer: await f.arrayBuffer(),
-                mimeType: f.type || "image/png",
+                // Crops are client-generated PNG blobs (see field-crops.ts).
+                // normalizeMimeType handles the edge case where the Blob has
+                // no `type` set (older browsers) — falls back via extension
+                // ("crop_N" has none, so returns null → default image/png).
+                mimeType: normalizeMimeType(f) ?? "image/png",
+                scale: m.scale ?? null,
             });
         } catch { /* skip unreadable part */ }
     }
@@ -150,6 +191,20 @@ export async function POST(request: NextRequest) {
       return fail(ErrorCode.FILE_TOO_LARGE, {
         vars: { limit: MAX_UPLOAD_SIZE_MB, actual: actualMb },
         context: "upload-size",
+      });
+    }
+
+    // ─── API-4b item 4: MIME normalization ────────────────────────────────
+    // Critical for API-5 (external callers use `application/octet-stream`
+    // by default; UI uses proper mime). Old `file.type || "image/png"`
+    // returned "octet-stream" (truthy!) so healthy PNG/PDF uploads got
+    // rejected downstream. Reject unsupported extensions here BEFORE
+    // R2 write / DB insert / credit charge.
+    const normalizedMime = normalizeMimeType(file);
+    if (!normalizedMime) {
+      return fail(ErrorCode.INVALID_FORMAT, {
+        detail: `unresolvable mime for name="${file.name}" type="${file.type}"`,
+        context: "upload-mime",
       });
     }
 
@@ -184,7 +239,28 @@ export async function POST(request: NextRequest) {
     // Variable pricing — count fields from the prompt to estimate cost.
     // Comma-separated list mirrors the format the frontend sends.
     const fieldCount = fieldsToExtract.split(",").filter(s => s.trim().length > 0).length;
-    const estimate = estimateCredits({ operation: "ocr", fields: fieldCount });
+    // BILL-1b hotfix (2026-07-12): read the ACTIVE credit model from
+    // admin settings and pass it to BOTH estimate branches. Pre-fix, the
+    // field branch omitted `creditModel` entirely (silently defaulted to
+    // legacy `field_formula`) and the fulldoc branch hardcoded `per_page`
+    // — so an admin toggle to `per_file` (or `per_page` for field mode)
+    // was ignored, producing estimate/charge mismatch vs. the client-side
+    // preview which already reads the active model.
+    const creditModel = await getActiveCreditModel(env);
+    const chargePageCount = Math.max(1, selectedPages.length || totalPages || 1);
+    const estimate = isFulldoc
+      ? estimateCredits({
+          operation: "ocr",
+          fields: 0,
+          pages: chargePageCount,
+          creditModel,
+        })
+      : estimateCredits({
+          operation: "ocr",
+          fields: fieldCount,
+          pages: chargePageCount,
+          creditModel,
+        });
     const balance = userRes.credits_remaining + userRes.extra_credits;
     if (balance < estimate.credits) {
       return fail(ErrorCode.INSUFFICIENT_CREDITS, {
@@ -282,7 +358,7 @@ ${sheetText}
           } else {
             prompt = built.prompt;
           }
-          imagePayload = { data: Buffer.from(arrayBuffer).toString("base64"), mimeType: file.type || "image/png" };
+          imagePayload = { data: Buffer.from(arrayBuffer).toString("base64"), mimeType: normalizedMime };
         } else if (ENABLE_PROMPT_PROFILES) {
           // S2-2: extract_fields profile — replaces the inline block below.
           // includeBbox=true keeps the /api/upload contract intact (bbox
@@ -299,7 +375,7 @@ ${sheetText}
           } else {
             prompt = built.prompt;
           }
-          imagePayload = { data: Buffer.from(arrayBuffer).toString("base64"), mimeType: file.type || "image/png" };
+          imagePayload = { data: Buffer.from(arrayBuffer).toString("base64"), mimeType: normalizedMime };
         } else {
           // Legacy inline prompt (flag OFF). Byte-identical to pre-S2-2.
           // API-1: when the user picked a subset of PDF pages, tell the model
@@ -338,7 +414,7 @@ ${fieldsBlock}
 4. หากเป็นประเภท (date) ให้ตอบ "value" เป็น YYYY-MM-DD
 5. หากเป็นประเภท (table) ให้ตอบ "value" เป็น Array of Objects และ "confidence" เป็นค่าเฉลี่ยของตารางนั้น (bbox = ครอบทั้งตาราง)
 6. ตอบกลับเป็น JSON ก้อนเดียวที่มี "key ตามหัวข้อที่ระบุด้านบนเท่านั้น" — ห้ามเพิ่มหัวข้ออื่น ห้ามคง key เก่าจากคำสั่งก่อนหน้า`;
-          imagePayload = { data: Buffer.from(arrayBuffer).toString("base64"), mimeType: file.type || "image/png" };
+          imagePayload = { data: Buffer.from(arrayBuffer).toString("base64"), mimeType: normalizedMime };
         }
 
         const startTime = Date.now();
@@ -363,24 +439,44 @@ ${fieldsBlock}
           console.error("Parse Error:", e);
         }
 
-        // S2-2: verbatim_transcribe response has shape { pages, corrections },
-        // not a field record. Reshape into a single `full_document` field so
-        // the existing DB / notifications / crop-merge code paths downstream
-        // stay untouched (crop-merge is a no-op anyway — fulldoc uploads have
-        // no field_crops manifest).
-        if (isFulldoc && extracted && typeof extracted === "object" && Array.isArray((extracted as any).pages)) {
-          const pages = (extracted as any).pages as Array<{ page: number; text: string }>;
-          const joined = pages
-            .map(p => `--- page ${p.page} ---\n${p.text ?? ""}`)
-            .join("\n\n");
-          extracted = {
-            full_document: {
-              value: joined,
-              confidence: 100,
-              corrections: Array.isArray((extracted as any).corrections) ? (extracted as any).corrections : [],
-              pages,
-            },
-          };
+        // API-4: fulldoc mode returns { pages: [{page,text}], corrections? }.
+        // Persist that shape directly so /api/status hands the frontend the
+        // per-page transcript unchanged (UI-4b's OCRWorkspaceV2 already reads
+        // `s.data.pages`). If the AI returned something unparseable or the
+        // wrong shape, fall back to a single page carrying the raw text so
+        // the user still sees output, and tag `_partial: true` so the client
+        // (and admin logs) can flag it.
+        if (isFulldoc) {
+          const parsedPages = extracted && typeof extracted === "object" && Array.isArray((extracted as any).pages)
+            ? (extracted as any).pages as Array<{ page: number; text: string }>
+            : null;
+          if (parsedPages) {
+            // Normalize: coerce page → int, text → string. Drop malformed entries.
+            const cleanPages = parsedPages
+              .map((p: any, i: number) => ({
+                page: Number.isFinite(p?.page) ? Number(p.page) : (selectedPages[i] ?? i + 1),
+                text: typeof p?.text === "string" ? p.text : String(p?.text ?? ""),
+              }));
+            extracted = {
+              pages: cleanPages,
+              ...(Array.isArray((extracted as any).corrections) && (extracted as any).corrections.length > 0
+                ? { corrections: (extracted as any).corrections }
+                : {}),
+            };
+          } else {
+            const fallbackPage = selectedPages[0] ?? 1;
+            extracted = {
+              pages: [{ page: fallbackPage, text: text || "" }],
+              _partial: true,
+            };
+            await logSystemEvent(
+              env,
+              "FULLDOC_SHAPE_FALLBACK",
+              `Doc ${docId} fulldoc AI response missing pages[]; raw slice="${(text || "").slice(0, 200)}"`,
+              "info",
+              userId,
+            ).catch(() => { });
+          }
         }
 
         // Accumulate token usage across all AI calls in this run so the
@@ -393,11 +489,34 @@ ${fieldsBlock}
         // Runs only when the client uploaded crops AND we already have a
         // whole-image result. On any failure below we keep the whole-image
         // result untouched — crops are a strict augmentation.
-        if (!isExcel && cropFiles.length > 0) {
+        // API-4: fulldoc bypasses the crop pass — crops target per-field
+        // extraction and the fulldoc response shape has no field slots to
+        // merge into. Defensive guard against a misbehaving client.
+        if (!isExcel && !isFulldoc && cropFiles.length > 0) {
           try {
             // S2-2: crop pass is now built by the layout_scan profile so it
             // shares the same rule block as the whole-image call. Flag OFF
             // keeps the OCR-6b inline mini-prompt below byte-identical.
+            // OCR-8b Rung 3 — dual-scale grouping. Preserve manifest order but
+            // collapse consecutive entries for the same fieldName into a group.
+            // `groupFieldNames[i]` is unique per group; `groupSizes[i]` is the
+            // number of images for that group (1 = single-scale, ≥2 = multi-
+            // scale). `groupScaleLabels[i]` labels each image ("high", "std").
+            interface CropGroup { fieldName: string; sizes: number; labels: string[] }
+            const cropGroups: CropGroup[] = [];
+            {
+                const norm = (s: string) => normalizeFieldNameKey(s);
+                for (const c of cropFiles) {
+                    const last = cropGroups[cropGroups.length - 1];
+                    const label = c.scale === "hi" ? "ความละเอียดสูง" : c.scale === "lo" ? "ความละเอียดมาตรฐาน" : "";
+                    if (last && norm(last.fieldName) === norm(c.fieldName)) {
+                        last.sizes += 1;
+                        last.labels.push(label);
+                    } else {
+                        cropGroups.push({ fieldName: c.fieldName, sizes: 1, labels: [label] });
+                    }
+                }
+            }
             const cropLabels = cropFiles.map((c, i) => `${i + 1}. "${c.fieldName}"`).join("\n");
             // OCR-6b: mini-prompt ported the critical rules from the
             // whole-image prompt (upload/route.ts:230) — the manual crop test
@@ -419,7 +538,9 @@ ${fieldsBlock}
             let cropPrompt: string;
             if (ENABLE_PROMPT_PROFILES) {
               const builtCrop = getPromptProfile("layout_scan", {
-                fieldNames: cropFiles.map(c => c.fieldName),
+                fieldNames: cropGroups.map(g => g.fieldName),
+                scaleGroups: cropGroups.map(g => g.sizes),
+                scaleLabels: cropGroups.map(g => g.labels),
               });
               cropPrompt = "fallback" in builtCrop
                 ? // Impossible-in-practice fallback: keep the old mini-prompt.
@@ -555,13 +676,46 @@ ${cropLabels}
         const processingTimeMs = Date.now() - startTime;
         const getValue = (obj: any) => (obj && typeof obj === 'object' && 'value' in obj) ? obj.value : obj;
 
-        const companyName = getValue(extracted.company_name || extracted.company || extracted["ชื่อบริษัท"]) ?? null;
-        const taxId = getValue(extracted.tax_id || extracted.tax || extracted["เลขผู้เสียภาษี"]) ?? null;
-        const totalAmount = getValue(extracted.total_amount || extracted.total || extracted["ยอดรวม"]) ?? null;
-        const invoiceDate = getValue(extracted.invoice_date || extracted.date || extracted["วันที่"]) ?? null;
+        // API-4: fulldoc has no company/tax/date fields — skip the summary
+        // insert (all-null row is pointless and clutters the extracted_data
+        // table). Field mode is unchanged.
+        if (!isFulldoc) {
+          const companyName = getValue(extracted.company_name || extracted.company || extracted["ชื่อบริษัท"]) ?? null;
+          const taxId = getValue(extracted.tax_id || extracted.tax || extracted["เลขผู้เสียภาษี"]) ?? null;
+          const totalAmount = getValue(extracted.total_amount || extracted.total || extracted["ยอดรวม"]) ?? null;
+          const invoiceDate = getValue(extracted.invoice_date || extracted.date || extracted["วันที่"]) ?? null;
 
-        await env.DB.prepare("INSERT INTO extracted_data (doc_id, company_name, tax_id, total_amount, invoice_date) VALUES (?, ?, ?, ?, ?)")
-          .bind(docId, companyName, taxId, totalAmount, invoiceDate).run();
+          await env.DB.prepare("INSERT INTO extracted_data (doc_id, company_name, tax_id, total_amount, invoice_date) VALUES (?, ?, ?, ?, ?)")
+            .bind(docId, companyName, taxId, totalAmount, invoiceDate).run();
+        }
+
+        // OCR-8 telemetry: attach crop-pass DPI + byte totals to raw_json so
+        // cost/quality trade-offs of the DPI bump can be tracked per run
+        // without adding a new column. Underscore-prefixed key keeps it out
+        // of any field-name lookup by convention.
+        if (cropManifest.length > 0) {
+          const totalBytes = cropManifest.reduce((sum, m) => sum + (typeof m.bytes === "number" ? m.bytes : 0), 0);
+          // OCR-8b Rung 3: report which scales the crop pass carried.
+          // Values are longEdge-px estimates (client-side render targets)
+          // — the server can't measure the actual crop dimensions cheaply
+          // but knows the DPI multiplier and standard baseline. Absence
+          // means single-scale (OCR-8 Rung 1) behaviour.
+          const scalesSeen = new Set<string>();
+          for (const m of cropManifest) if (m.scale) scalesSeen.add(m.scale);
+          const cropScales = scalesSeen.size > 0
+            ? (scalesSeen.has("hi") && scalesSeen.has("lo")
+                ? [DEFAULT_HI_CROP_LONG_EDGE * cropDpiScale, DEFAULT_HI_CROP_LONG_EDGE]
+                : scalesSeen.has("hi")
+                ? [DEFAULT_HI_CROP_LONG_EDGE * cropDpiScale]
+                : [DEFAULT_HI_CROP_LONG_EDGE])
+            : undefined;
+          (extracted as any)._crop_meta = {
+            dpi_scale: cropDpiScale,
+            total_bytes: totalBytes,
+            crop_count: cropManifest.length,
+            ...(cropScales ? { crop_scales: cropScales } : {}),
+          };
+        }
 
         await env.DB.prepare("UPDATE documents SET status = ?, raw_json = ?, processing_time_ms = ? WHERE id = ?")
           .bind("completed", JSON.stringify(extracted), processingTimeMs, docId).run();
@@ -609,8 +763,10 @@ ${cropLabels}
 
           // AI returns confidence as 0..100; normalize to 0..1 to match the
           // threshold stored in user_preferences.
+          // API-4: fulldoc has no per-field confidence — skip the scan (the
+          // extracted shape is { pages: [...] }, no confidence markers).
           const fieldConfidences: number[] = [];
-          for (const v of Object.values(extracted)) {
+          if (!isFulldoc) for (const v of Object.values(extracted)) {
             if (v && typeof v === "object" && "confidence" in v && typeof (v as any).confidence === "number") {
               const raw = (v as any).confidence;
               fieldConfidences.push(raw > 1 ? raw / 100 : raw);
@@ -650,6 +806,14 @@ ${cropLabels}
           .bind(userId, userId, retentionLimit).run();
 
       } catch (ocrError: any) {
+        // API-4b: /api/upload does NOT need a refund on this path — credits
+        // are only charged (line ~708 via `chargeCreditsAtomic`) AFTER the
+        // AI call succeeds. Any exception from `generateWithAI` above lands
+        // here BEFORE the charge, so nothing to reverse. This is the
+        // architectural difference vs. /api/v1/extract, which charges
+        // upfront and therefore requires `refundCreditsAtomic` on AI fail.
+        // If a future refactor moves the charge earlier, add the same
+        // refund pattern here — see pm/reports/API-4b.md flow diagram.
         console.error("OCR Error:", ocrError);
         await logSystemEvent(env, "OCR_EXTRACTION_ERROR", ocrError.message, "error", userId);
         await env.DB.prepare("UPDATE documents SET status = ?, raw_json = ? WHERE id = ?")

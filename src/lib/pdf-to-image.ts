@@ -35,7 +35,21 @@ export interface PdfRasterOptions {
      *  original page), and `pageNumbers[i]` records the ORIGINAL page number
      *  it came from. */
     pages?: number[];
+    /** OCR-8 Rung 1: upper bound on the pdfjs render scale. Historically capped
+     *  at 4 so a small-source PDF wouldn't blow memory. The crop pass opts into
+     *  a higher cap (e.g. 8) so `targetLongEdge` of 7200 is actually reachable
+     *  on standard A4 pages (base longEdge ≈ 842pt → cap 4 clamps to ~3368px,
+     *  never reaching 7200). Whole-image rasters keep the default cap.
+     */
+    maxScale?: number;
 }
+
+/** OCR-8: default long-edge (px) used by the whole-image OCR pass. Kept in
+ *  sync with the historical 3600 baseline (see pdf-to-image comment above).
+ *  Exported so the crop path can express its scale as a multiplier of this
+ *  value (`DEFAULT_TARGET_LONG_EDGE * CROP_DPI_SCALE`) rather than duplicating
+ *  the constant. */
+export const DEFAULT_TARGET_LONG_EDGE = 3600;
 
 /** Per-page pixel rect inside the stacked output PNG. Origin is top-left of the
  *  stacked image; each page has `x = 0` and its own width/height. Used by the
@@ -105,7 +119,8 @@ export async function pdfFileToImageDetailed(
     // 3600px ~= 300 DPI on A4 long-edge. Bumped from 2400 (200 DPI) after
     // users reported misreads on small Thai text (e.g. "ช็อคบอล" → "คอบอล").
     // Trade-off: image ~2.25× larger → more input tokens + 1-2s slower conversion.
-    const targetLongEdge = opts.targetLongEdge ?? 3600;
+    const targetLongEdge = opts.targetLongEdge ?? DEFAULT_TARGET_LONG_EDGE;
+    const maxScale = opts.maxScale ?? 4;
 
     const pdfjs = await loadPdfjs();
     const buf = await file.arrayBuffer();
@@ -149,7 +164,7 @@ export async function pdfFileToImageDetailed(
         const base = page.getViewport({ scale: 1 });
         const longEdge = Math.max(base.width, base.height) || 1;
         // Scale up small PDF pages so OCR has enough resolution; cap at 4x.
-        const scale = Math.min(4, Math.max(1, targetLongEdge / longEdge));
+        const scale = Math.min(maxScale, Math.max(1, targetLongEdge / longEdge));
         const viewport = page.getViewport({ scale });
 
         const canvas = document.createElement("canvas");

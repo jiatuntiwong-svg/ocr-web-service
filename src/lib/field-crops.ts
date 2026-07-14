@@ -74,7 +74,26 @@ export interface FieldCrop {
     blob: Blob;
     /** Pixel rect actually cropped from the stacked image (debug/telemetry). */
     rect: { x: number; y: number; width: number; height: number };
+    /** OCR-8 telemetry: emitted crop PNG size in bytes. Bubbled up in the
+     *  `field_crops` manifest so the server can log per-run `_crop_bytes` /
+     *  `_crop_dpi` metadata to raw_json for cost-observability. */
+    bytes: number;
+    /** OCR-8b Rung 3: scale tag when the caller emits the SAME field at
+     *  multiple resolutions in one crop pass. Undefined = single-scale (the
+     *  OCR-6..OCR-8 Rung-1 behaviour). "hi" = highest-DPI render; "lo" =
+     *  standard-DPI render. Server groups by fieldName preserving array
+     *  order, so [hi, lo] pairs must stay contiguous per field. */
+    scale?: "hi" | "lo";
 }
+
+/** OCR-8 Rung 1: scale multiplier applied to the crop-pass render vs the
+ *  whole-image render. `2` means the pages that carry hints are re-rasterized
+ *  at 2× the whole-image DPI purely for the crop tiles the model sees. Token
+ *  cost of the crop pass rises ~4× (roughly bytes^2 for image tokens on
+ *  Gemini) but only affects hinted fields — whole-image pass remains cheap.
+ *  Bumped from implicit 1 after `landscape-a4-widefield` demonstrated the
+ *  model cannot resolve the "รับบริจาค" glyph cluster at 300 DPI (S2-2). */
+export const CROP_DPI_SCALE = 2;
 
 /** Load a File/Blob into an HTMLImageElement once and return its natural
  *  pixel dimensions along with the element (ready to `drawImage` from). */
@@ -183,6 +202,7 @@ export async function buildFieldCrops(
             page: hint.page ?? 1,
             blob,
             rect: { x: sx, y: sy, width: sw, height: sh },
+            bytes: blob.size,
         });
     }
 
@@ -195,4 +215,45 @@ export async function buildFieldCrops(
         })));
     }
     return crops;
+}
+
+/** OCR-8b Rung 3 — interleave two per-field crop arrays into a single
+ *  dual-scale manifest. Preserves fieldName order (order of `hiCrops`),
+ *  contiguously grouping each field's [hi, lo] pair. Fields present in one
+ *  side but not the other (e.g. hint dropped by page-remap in one render)
+ *  are emitted as a single-scale entry in whichever list they appeared so
+ *  the crop pass still runs.
+ *
+ *  Both inputs MUST have been built with the SAME field list and page
+ *  selection — the caller is expected to run buildFieldCrops twice with two
+ *  raster sources (hi-DPI, standard-DPI) sharing pageRects semantics. */
+export function interleaveDualScaleCrops(
+    hiCrops: FieldCrop[],
+    loCrops: FieldCrop[],
+): FieldCrop[] {
+    const loByField = new Map<string, FieldCrop[]>();
+    for (const c of loCrops) {
+        const k = normalizeFieldNameKey(c.fieldName);
+        const arr = loByField.get(k) ?? [];
+        arr.push(c);
+        loByField.set(k, arr);
+    }
+    const consumedHiFields = new Set<string>();
+    const out: FieldCrop[] = [];
+    for (const hi of hiCrops) {
+        const k = normalizeFieldNameKey(hi.fieldName);
+        consumedHiFields.add(k);
+        out.push({ ...hi, scale: "hi" });
+        const loList = loByField.get(k);
+        const lo = loList && loList.shift();
+        if (lo) out.push({ ...lo, scale: "lo" });
+    }
+    // Fields with only a lo crop (rare — hi render failed for that field
+    // but lo succeeded): still send them so the field isn't silently dropped.
+    for (const c of loCrops) {
+        const k = normalizeFieldNameKey(c.fieldName);
+        if (consumedHiFields.has(k)) continue;
+        out.push({ ...c, scale: "lo" });
+    }
+    return out;
 }

@@ -55,6 +55,7 @@ function parseArgs(argv) {
     else if (eq("--runs")) out.runs = Number(val("--runs"));
     else if (eq("--fail-under")) out.failUnder = Number(val("--fail-under"));
     else if (eq("--log")) out.logLevel = val("--log");
+    else if (eq("--delay-ms")) out.delayMs = Number(val("--delay-ms"));
     else if (a === "--dry-run") out.dryRun = true;
     else if (a === "--help" || a === "-h") out.help = true;
     else if (!a.startsWith("--") && !out.config) out.config = a;
@@ -75,6 +76,11 @@ Flags:
   --runs <N>              override runs-per-case
   --fail-under <score>    exit 1 if overall score < N (0..1). CI use.
   --log silent|normal|verbose
+  --delay-ms <N>          sleep N ms after each PASSING run (both inter-run
+                          within a case and inter-case). Skipped after the
+                          final run. Default 0. Use to pace against
+                          provider/edge rate limits when running the full
+                          suite in one shot.
   --dry-run               parse + print planned run matrix, do not launch browser
   --help, -h              this help
 
@@ -429,7 +435,11 @@ async function main() {
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const caseResults = [];
 
-  for (const c of selected) {
+  const delayMs = Number(args.delayMs) > 0 ? Number(args.delayMs) : 0;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  for (let ci = 0; ci < selected.length; ci++) {
+    const c = selected[ci];
     const assertionFn = ASSERTIONS[c.assertion];
     if (!assertionFn) {
       log("normal", `[${c.id}] unknown assertion "${c.assertion}" — skipping`);
@@ -450,6 +460,11 @@ async function main() {
     const withCorrections = c.assertion === "corrections_report" || c.assertion === "verbatim";
     const runsOut = [];
     for (let i = 0; i < c.runs; i++) {
+      // Clear cookies before each case so a prior successful login doesn't
+      // auto-redirect /login → /dashboard (session persists across pages in
+      // the shared context; without this the email input never appears on
+      // runs 2+ and every case times out).
+      await context.clearCookies();
       const page = await context.newPage();
       let raw = null, error = null;
       const t0 = Date.now();
@@ -475,6 +490,17 @@ async function main() {
       runsOut.push({ i: i + 1, ms, observed, verdict });
       log("normal", `[${c.id}] run ${i + 1}/${c.runs}: ${verdict.pass ? "PASS" : "FAIL"} — ${verdict.reason} (${ms} ms)`);
       await page.close();
+      // Rate-limit pacing (S2-1c): sleep after a passing run when another
+      // run follows — either later in this case or in a subsequent case.
+      // Failing runs skip the delay (no point pacing a broken run).
+      if (delayMs > 0 && verdict.pass) {
+        const hasNextInCase = i + 1 < c.runs;
+        const hasNextCase = ci + 1 < selected.length;
+        if (hasNextInCase || hasNextCase) {
+          log("verbose", `[DELAY] sleeping ${delayMs}ms before next run`);
+          await sleep(delayMs);
+        }
+      }
     }
     const cr = { ...c, runs: runsOut };
     caseResults.push(cr);

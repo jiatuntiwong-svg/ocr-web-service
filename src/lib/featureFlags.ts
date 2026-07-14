@@ -53,3 +53,15 @@ export const ENABLE_TEMPLATE_RULEBASE = true;
 // case ("รับบริจาค" drop) requires the new rule block.
 // See: docs/080726/OCR_IMPROVEMENT_TECHNIQUES_KB.md §2, pm/reports/S2-2.md
 export const ENABLE_PROMPT_PROFILES = true;
+
+// ─── Dual-scale crops (OCR-8b Rung 3) ──────────────────────────────────
+// Rasterize each hinted field's crop at TWO DPIs (hi = CROP_DPI_SCALE×,
+// lo = standard) and send both images to the crop pass. Shared rules
+// v2026-07-12-v2 tells the model to reconcile and prefer the longer/more-
+// complete reading. Aimed at the `landscape-a4-widefield` deterministic
+// "รับบริจาค" drop that Rung 1 (single-scale DPI 2×) did not clear.
+// Cost impact: +1 image per hinted field on the crop pass (~2× crop-pass
+// input tokens). Flag OFF = OCR-8 Rung 1 single-scale behaviour,
+// byte-identical.
+// See: pm/reports/OCR-8b.md
+export const ENABLE_DUAL_SCALE_CROPS = true;
