@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8" />
+<title>OCR-9 fixture: multipage-same-field-different-values</title>
+<style>
+  @page { size: A4; margin: 15mm; }
+  body { font-family: "Sarabun", "TH Sarabun New", "Tahoma", sans-serif; color: #000; margin: 0; padding: 0; }
+  .page { padding: 24px 40px; box-sizing: border-box; min-height: 240mm; }
+  .page + .page { page-break-before: always; }
+  h1 { font-size: 22pt; margin: 0 0 24px 0; }
+  .row { display: flex; gap: 16px; font-size: 18pt; margin: 12px 0; }
+  .label { font-weight: bold; min-width: 220px; }
+  .value { border-bottom: 1px solid #000; padding-bottom: 2px; min-width: 260px; }
+  .body { margin-top: 32px; font-size: 14pt; line-height: 1.6; }
+</style>
+</head>
+<body>
+  <div class="page">
+    <h1>ใบส่งของ — หน้า 1</h1>
+    <div class="row"><div class="label">เลขที่เอกสาร</div><div class="value">DOC-001</div></div>
+    <div class="row"><div class="label">วันที่</div><div class="value">15 กรกฎาคม 2569</div></div>
+    <div class="row"><div class="label">ผู้ส่ง</div><div class="value">คลังกลาง กรุงเทพ</div></div>
+    <div class="row"><div class="label">ผู้รับ</div><div class="value">คลังภาค 3 จ.ชลบุรี</div></div>
+    <p class="body">รายละเอียดหน้าที่ 1: สินค้าจำนวน 12 รายการ ส่งจากคลังต้นทาง ตามหมายเลข DOC-001 ที่ระบุด้านบน กรุณาตรวจสอบและลงนามรับสินค้าตามรายการที่แนบมาพร้อมเอกสารฉบับนี้</p>
+  </div>
+  <div class="page">
+    <h1>ใบส่งของ — หน้า 2</h1>
+    <div class="row"><div class="label">เลขที่เอกสาร</div><div class="value">DOC-002</div></div>
+    <div class="row"><div class="label">วันที่</div><div class="value">15 กรกฎาคม 2569</div></div>
+    <div class="row"><div class="label">ผู้ส่ง</div><div class="value">คลังกลาง กรุงเทพ</div></div>
+    <div class="row"><div class="label">ผู้รับ</div><div class="value">คลังภาค 5 จ.เชียงใหม่</div></div>
+    <p class="body">รายละเอียดหน้าที่ 2: เอกสารฉบับต่อเนื่อง เลขที่ DOC-002 ครอบคลุมรายการส่งของเพิ่มเติมอีก 8 รายการ ที่มีปลายทางแตกต่างจากหน้าที่ 1 แม้จะใช้ label เดียวกันคือ "เลขที่เอกสาร" ก็ตาม ค่าจริงคือ DOC-002 ไม่ใช่ DOC-001</p>
+  </div>
+</body>
+</html>

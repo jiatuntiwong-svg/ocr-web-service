@@ -114,8 +114,17 @@ docs/
   CREDIT_PRICING_SUMMARY.md  Exec pricing review (slide-ready)
   PENDING_FEATURES_BACKLOG.md  Full feature backlog with decisions
   PENDING_LINE_AND_INTEGRATIONS_PLAN.md  Cross-team integration plan
+  MIGRATION.md               Cloudflare → Docker migration handoff
+  BEHAVIOR_REFERENCE.md       Flow-by-flow behavior baseline (Docker sign-off)
+  OPS_RUNBOOK.md              Deploy/debug/secrets/backup runbook
+  SECURITY_HANDOFF.md         What's security-reviewed vs. still open
+  ACCESS_CHECKLIST.md         Accounts/access a new collaborator needs
 scripts/
   poc-*                      POC scripts for new format support
+pm/
+  README.md                  What the pm/ sprint-tracking folder is (read this first)
+  BOARD.md                   Sprint status + decision log
+  tasks/, reports/           Per-agent work orders + completed-task reports
 ```
 
 ---

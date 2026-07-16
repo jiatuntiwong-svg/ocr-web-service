@@ -24,7 +24,9 @@ import { ErrorCode } from "@/lib/errorCodes";
 import { pdfFileToImageDetailed, type PdfRasterResult, type StackedPageRect, DEFAULT_TARGET_LONG_EDGE } from "@/lib/pdf-to-image";
 import { docxFileToImage } from "@/lib/docx-to-image";
 import { buildFieldCrops, CROP_DPI_SCALE, interleaveDualScaleCrops } from "@/lib/field-crops";
-import { ENABLE_DUAL_SCALE_CROPS } from "@/lib/featureFlags";
+import { ENABLE_DUAL_SCALE_CROPS, ENABLE_OCR_HIGHLIGHT_VALIDATION } from "@/lib/featureFlags";
+import { getPageTextLayer } from "@/lib/highlight-pipeline/textLayer";
+import { findInTextLayer } from "@/lib/highlight-pipeline/search";
 import { estimateCredits, creditTone, type CreditModel, DEFAULT_CREDIT_MODEL } from "@/lib/pricing";
 import { exportOCRResult } from "@/lib/exportUtils";
 import { PAGE_SELECTION_MAX } from "@/lib/ocrBatchConfig";
@@ -32,7 +34,10 @@ import { evaluateConfirm, makeFingerprint, shouldSkipDialog } from "@/lib/credit
 import { ENABLE_OCR_SCAN_LINE, ENABLE_LOADING_STORY } from "@/lib/featureFlags";
 import { usePanZoom } from "@/lib/hooks/usePanZoom";
 import CreditConfirmDialog from "./CreditConfirmDialog";
-import OCRWorkspaceV1 from "./OCRWorkspace";
+import OCRBatchViewV2 from "./OCRBatchViewV2";
+import TemplatePickerPanel from "./TemplatePickerPanel";
+import ExcelPreview from "./ExcelPreview";
+import { isExcelFile } from "@/lib/excel-parser";
 
 // ─── Types ────────────────────────────────────────────────────────────────
 interface FieldBboxHint { x: number; y: number; width: number; height: number; page?: number; space?: "page"; }
@@ -125,7 +130,9 @@ export default function OCRWorkspaceV2({ user, balance = 0, onDocumentProcessed,
     const [loading, setLoading] = useState(false);
     const [progress, setProgress] = useState(0);
     const [result, setResult] = useState<OCRResult | null>(null);
-    const [fulldocResult, setFulldocResult] = useState<{ pages: { page: number; text: string }[] } | null>(null);
+    const [fulldocResult, setFulldocResult] = useState<{ pages: { page: number; text: string }[]; raw?: any } | null>(null);
+    // UI-7 UAT r5 #1 — fulldoc results now have Text / JSON tabs.
+    const [fulldocTab, setFulldocTab] = useState<"text" | "json">("text");
     const [error, setError] = useState<string | null>(null);
     const [attempt, setAttempt] = useState<1 | 2>(1); // 2 = retry
     const [displayedAttempt, setDisplayedAttempt] = useState<"attempt1" | "retry">("attempt1");
@@ -512,6 +519,12 @@ export default function OCRWorkspaceV2({ user, balance = 0, onDocumentProcessed,
         }
 
         setFile(f);
+        // UI-7 UAT r5 #4 — Excel files render via <ExcelPreview>, no blob URL.
+        // Mirrors v1 processFile flow (OCRWorkspace.tsx L481-487).
+        if (isExcelFile(f)) {
+            setPreviews([]);
+            return;
+        }
         if (f.type === "application/pdf") {
             try {
                 const detailed = await pdfFileToImageDetailed(f);
@@ -693,13 +706,40 @@ export default function OCRWorkspaceV2({ user, balance = 0, onDocumentProcessed,
                     const s = await res.json() as { status?: string; data?: any };
                     if (s.status === "completed") {
                         if (extractMode === "fulldoc") {
-                            // Server hasn't been taught fulldoc yet — synthesise
-                            // a per-page transcript view by joining any string
-                            // values in the response. Follow-up: proper shape.
-                            const txt = Object.values(s.data || {})
-                                .map((v: any) => (v && typeof v === "object" && "value" in v) ? String(v.value) : String(v ?? ""))
-                                .join("\n\n");
-                            setFulldocResult({ pages: [{ page: 1, text: txt }] });
+                            // UI-7 UAT r5 #1 — API-4 shipped `{pages:[{page,text}]}`
+                            // as the canonical shape. Prefer that when present.
+                            // If missing (older server / crop-fallback path), we
+                            // synthesise: iterate response entries, honour {value}
+                            // wrappers, and SKIP nested objects/arrays that would
+                            // otherwise stringify to "[object Object]" — that was
+                            // the "Object" bug users hit (pages array itself was
+                            // caught by the naive typeof===object branch).
+                            const raw: any = s.data || {};
+                            let pagesOut: { page: number; text: string }[];
+                            if (Array.isArray(raw.pages)
+                                && raw.pages.every((p: any) => p && typeof p === "object" && "text" in p)) {
+                                pagesOut = raw.pages.map((p: any, i: number) => ({
+                                    page: Number(p.page ?? i + 1),
+                                    text: String(p.text ?? ""),
+                                }));
+                            } else {
+                                const parts: string[] = [];
+                                for (const v of Object.values(raw)) {
+                                    if (v == null) continue;
+                                    if (typeof v === "string" || typeof v === "number") {
+                                        parts.push(String(v));
+                                    } else if (typeof v === "object" && "value" in (v as any)) {
+                                        const val = (v as any).value;
+                                        if (val != null && typeof val !== "object") parts.push(String(val));
+                                    }
+                                    // Silently skip arrays / nested objects — no more "[object Object]".
+                                }
+                                pagesOut = [{ page: 1, text: parts.join("\n\n") }];
+                            }
+                            setFulldocResult({
+                                pages: pagesOut.length > 0 ? pagesOut : [{ page: 1, text: "" }],
+                                raw,
+                            });
                         } else {
                             setResult(s.data);
                         }
@@ -793,15 +833,36 @@ export default function OCRWorkspaceV2({ user, balance = 0, onDocumentProcessed,
     };
 
     // Result field row helpers.
+    // UI-7 UAT r6 Bug 1 — table-type fields arrive as an array of row objects.
+    // `String([{...}, {...}])` → "[object Object],[object Object]"; stringify
+    // arrays/objects as pretty JSON so the Fields tab and edit input render
+    // something readable. Simple scalars keep their existing coercion.
+    // Also carries `isComplex` so the Fields tab can gate the inline edit
+    // input (round-trip JSON editing is UI-7b scope).
+    const stringifyFieldValue = (v: any): { display: string; isComplex: boolean } => {
+        if (v == null) return { display: "", isComplex: false };
+        if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+            return { display: String(v), isComplex: false };
+        }
+        try { return { display: JSON.stringify(v, null, 2), isComplex: true }; }
+        catch { return { display: String(v), isComplex: true }; }
+    };
     const resultEntries = useMemo(() => {
-        if (!result) return [] as { key: string; value: string; confidence: number; source: string; bbox: any; corrections: any[]; raw: any; }[];
+        if (!result) return [] as {
+            key: string; value: string; isComplex: boolean; fieldType: string;
+            confidence: number; source: string; bbox: any; corrections: any[]; raw: any;
+        }[];
         return Object.entries(result)
             .filter(([k]) => !k.startsWith("_"))
             .map(([k, v]: [string, any]) => {
-                if (v && typeof v === "object") {
+                const fieldType = extractFields.find(f => f.name === k)?.type || "text";
+                if (v && typeof v === "object" && !Array.isArray(v) && ("value" in v || "confidence" in v || "bbox" in v)) {
+                    const disp = stringifyFieldValue(v.value);
                     return {
                         key: k,
-                        value: String(v.value ?? ""),
+                        value: disp.display,
+                        isComplex: disp.isComplex,
+                        fieldType,
                         confidence: Number(v.confidence ?? 0),
                         source: v.crop_miss ? "crop_miss" : v.crop_no_match ? "crop_no_match" : v.source || "ai",
                         bbox: v.bbox || v.bbox_hint || null,
@@ -809,8 +870,127 @@ export default function OCRWorkspaceV2({ user, balance = 0, onDocumentProcessed,
                         raw: v,
                     };
                 }
-                return { key: k, value: String(v ?? ""), confidence: 0, source: "ai", bbox: null, corrections: [], raw: v };
+                const disp = stringifyFieldValue(v);
+                return {
+                    key: k, value: disp.display, isComplex: disp.isComplex, fieldType,
+                    confidence: 0, source: "ai", bbox: null, corrections: [], raw: v,
+                };
             });
+    }, [result, extractFields]);
+
+    // UI-7 UAT r6 Bug 2 — sanity guards on bbox before drawing an overlay.
+    // Returns `{ b, skip }`. Skip reasons:
+    //  • "table-type-skip"  — table bbox from Gemini is usually meaningless
+    //  • "degenerate"       — NaN / undefined / near-zero components
+    //  • "out-of-bounds"    — coord > 1.5 or coord + size > 1.5 after norm
+    // `window.__OCR_HIGHLIGHT_DEBUG__` mode emits `[HIGHLIGHT_SKIP]` logs.
+    const evaluateHighlight = useCallback((rawBbox: any, fieldType: string): {
+        b: { x: number; y: number; width: number; height: number; page: any } | null;
+        skip: null | "table-type-skip" | "degenerate" | "out-of-bounds";
+    } => {
+        if (fieldType === "table") return { b: null, skip: "table-type-skip" };
+        if (!rawBbox) return { b: null, skip: null };
+        let bx = Number(rawBbox.x ?? rawBbox.x0 ?? NaN);
+        let by = Number(rawBbox.y ?? rawBbox.y0 ?? NaN);
+        let bw = Number(rawBbox.width ?? (rawBbox.x1 != null ? rawBbox.x1 - (rawBbox.x0 ?? 0) : NaN));
+        let bh = Number(rawBbox.height ?? (rawBbox.y1 != null ? rawBbox.y1 - (rawBbox.y0 ?? 0) : NaN));
+        if (![bx, by, bw, bh].every(n => Number.isFinite(n))) return { b: null, skip: "degenerate" };
+        const looksPixel = bx > 1 || by > 1 || bw > 1 || bh > 1;
+        if (looksPixel) {
+            const longEdge = DEFAULT_TARGET_LONG_EDGE;
+            bx = bx / longEdge; by = by / longEdge; bw = bw / longEdge; bh = bh / longEdge;
+        }
+        if (bw <= 0.001 || bh <= 0.001) return { b: null, skip: "degenerate" };
+        if (bx > 1.5 || by > 1.5 || bx + bw > 1.5 || by + bh > 1.5) return { b: null, skip: "out-of-bounds" };
+        return { b: { x: bx, y: by, width: bw, height: bh, page: rawBbox.page }, skip: null };
+    }, []);
+
+    // Map: fieldKey → skip reason (null = renderable). Used by both the
+    // overlay render (skip the div) and the Fields tab (⌗ glyph affordance).
+    const highlightSkipByKey = useMemo(() => {
+        const m = new Map<string, "table-type-skip" | "degenerate" | "out-of-bounds" | null>();
+        for (const e of resultEntries) {
+            if (!e.bbox && e.fieldType !== "table") { m.set(e.key, null); continue; }
+            const { skip } = evaluateHighlight(e.bbox, e.fieldType);
+            m.set(e.key, skip);
+            if (skip && typeof window !== "undefined" && (window as any).__OCR_HIGHLIGHT_DEBUG__) {
+                // eslint-disable-next-line no-console
+                console.log("[HIGHLIGHT_SKIP]", e.key, { reason: skip, fieldType: e.fieldType, raw: e.bbox });
+            }
+        }
+        return m;
+    }, [resultEntries, evaluateHighlight]);
+
+    // ─── OCR-10 Phase 1 quick win: text-layer bbox validation ────────────
+    // For text-based PDFs (client-side text layer available), search for
+    // each entry's `value` in the page's text layer and, when found, use
+    // the text-layer bbox INSTEAD of the AI bbox. Table-type + non-string
+    // + empty values are skipped (see fallback matrix in OCR-10-quickwin).
+    // Flag OFF or no match → fall through to existing AI-bbox path.
+    // Map: `${key}::${page}` → { x, y, width, height, page } | null
+    const [validatedBboxByKey, setValidatedBboxByKey] = useState<Map<string, { x: number; y: number; width: number; height: number; page: number }>>(new Map());
+    useEffect(() => {
+        if (!ENABLE_OCR_HIGHLIGHT_VALIDATION) return;
+        if (!result || !file || file.type !== "application/pdf") {
+            if (validatedBboxByKey.size) setValidatedBboxByKey(new Map());
+            return;
+        }
+        let cancelled = false;
+        (async () => {
+            const next = new Map<string, { x: number; y: number; width: number; height: number; page: number }>();
+            // Group entries by page (fall back to previewPage+1 when bbox has no page).
+            for (const e of resultEntries) {
+                if (e.fieldType === "table") {
+                    if (typeof window !== "undefined" && (window as any).__OCR_HIGHLIGHT_DEBUG__) {
+                        // eslint-disable-next-line no-console
+                        console.log("[HIGHLIGHT_VALIDATION]", e.key, { reason: "table-skip" });
+                    }
+                    continue;
+                }
+                const needle = (e.value || "").trim();
+                if (!needle || e.isComplex) continue;
+                const pageNum = (e.bbox && Number.isFinite(Number(e.bbox.page))) ? Number(e.bbox.page) : (previewPage + 1);
+                if (!pageNum || pageNum < 1) continue;
+                const layer = await getPageTextLayer(file, pageNum);
+                if (cancelled) return;
+                if (!layer) {
+                    if (typeof window !== "undefined" && (window as any).__OCR_HIGHLIGHT_DEBUG__) {
+                        // eslint-disable-next-line no-console
+                        console.log("[HIGHLIGHT_VALIDATION]", e.key, { reason: "no-layer", page: pageNum });
+                    }
+                    continue;
+                }
+                // AI bbox as proximity hint — only pass when we have a
+                // sanity-safe normalized bbox from evaluateHighlight.
+                const evaluated = evaluateHighlight(e.bbox, e.fieldType);
+                const hint = evaluated.b
+                    ? { x: evaluated.b.x, y: evaluated.b.y, width: evaluated.b.width, height: evaluated.b.height }
+                    : undefined;
+                const hit = findInTextLayer(layer, needle, hint);
+                if (!hit) {
+                    if (typeof window !== "undefined" && (window as any).__OCR_HIGHLIGHT_DEBUG__) {
+                        // eslint-disable-next-line no-console
+                        console.log("[HIGHLIGHT_VALIDATION]", e.key, { reason: "no-match", page: pageNum, needle });
+                    }
+                    continue;
+                }
+                next.set(e.key, { ...hit.bbox, page: pageNum });
+                if (typeof window !== "undefined" && (window as any).__OCR_HIGHLIGHT_DEBUG__) {
+                    // eslint-disable-next-line no-console
+                    console.log("[HIGHLIGHT_VALIDATION]", e.key, { reason: "matched", page: pageNum, kind: hit.kind, bbox: hit.bbox });
+                }
+            }
+            if (!cancelled) setValidatedBboxByKey(next);
+        })();
+        return () => { cancelled = true; };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [result, file, resultEntries]);
+    // Log once when the flag is off, so telemetry captures the fallback path.
+    useEffect(() => {
+        if (!ENABLE_OCR_HIGHLIGHT_VALIDATION && result && typeof window !== "undefined" && (window as any).__OCR_HIGHLIGHT_DEBUG__) {
+            // eslint-disable-next-line no-console
+            console.log("[HIGHLIGHT_VALIDATION]", { reason: "flag-off" });
+        }
     }, [result]);
 
     const allCorrections = useMemo(() => {
@@ -961,8 +1141,11 @@ export default function OCRWorkspaceV2({ user, balance = 0, onDocumentProcessed,
                         </React.Fragment>
                     );
                 })}
-                {/* UI-4c §3d — right-aligned ModeSwitch on the stepper bar. */}
+                {/* UI-4c §3d — right-aligned ModeSwitch on the stepper bar.
+                    UI-7 UAT r5 #5 — QuickModeToggle rendered alongside so it's
+                    visible in single-file mode too (was previously batch-only). */}
                 <div style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 8, flexShrink: 0, paddingLeft: 12 }}>
+                    <QuickModeToggle quickMode={quickMode} onChange={setQuickMode} t={t} />
                     <ModeSwitch mode={uiMode} onChange={setUiMode} t={t} />
                 </div>
             </div>
@@ -1015,6 +1198,22 @@ export default function OCRWorkspaceV2({ user, balance = 0, onDocumentProcessed,
         if (!file) return null;
         const src = previews[previewPage] || previews[0];
         const showOverlay = overlayEnabled && !!result && currentStage !== "run";
+        // UI-7 UAT r5 #4 — Excel files skip the PDF/image pipeline entirely.
+        const excel = isExcelFile(file);
+        if (excel) {
+            return (
+                <div style={{
+                    background: "var(--color-bg-card)",
+                    border: "1px solid var(--color-border)",
+                    borderRadius: 12, padding: 12, minHeight: 460, flex: 1,
+                    display: "flex", flexDirection: "column", minWidth: 0,
+                }}>
+                    <div style={{ flex: 1, minHeight: 380, overflow: "auto", borderRadius: 8 }}>
+                        <ExcelPreview file={file} />
+                    </div>
+                </div>
+            );
+        }
         return (
             <div style={{
                 background: "var(--color-bg-card)",
@@ -1145,10 +1344,29 @@ export default function OCRWorkspaceV2({ user, balance = 0, onDocumentProcessed,
                             transition: "opacity 0.15s ease",
                         }}>
                         {resultEntries.map((e, i) => {
-                            if (!e.bbox) return null;
-                            const b = e.bbox;
+                            // OCR-10 Phase 1 — prefer text-layer-validated bbox
+                            // when available (text-based PDFs); fall through to
+                            // r6 AI-bbox path otherwise.
+                            const validated = validatedBboxByKey.get(e.key);
+                            let b: { x: number; y: number; width: number; height: number; page: any } | null = null;
+                            if (validated) {
+                                b = { ...validated, page: validated.page };
+                            } else {
+                                if (!e.bbox) return null;
+                                // UI-7 UAT r6 Bug 2 — sanity guards centralized in
+                                // `evaluateHighlight` (skips table-type + degenerate
+                                // + out-of-bounds bboxes with `[HIGHLIGHT_SKIP]`
+                                // logging). r5 pixel/fraction normalization lives
+                                // inside that helper now.
+                                b = evaluateHighlight(e.bbox, e.fieldType).b;
+                            }
+                            if (!b) return null;
                             if (b.page && b.page !== previewPage + 1) return null;
-                            const color = TYPE_COLOR[extractFields.find(f => f.name === e.key)?.type || "text"] || "#06b6d4";
+                            if (typeof window !== "undefined" && (window as any).__OCR_HIGHLIGHT_DEBUG__) {
+                                // eslint-disable-next-line no-console
+                                console.log("[HIGHLIGHT_DEBUG]", e.key, { raw: e.bbox, normalized: b, previewPage: previewPage + 1 });
+                            }
+                            const color = TYPE_COLOR[e.fieldType] || "#06b6d4";
                             const isSelected = selectedFieldName === e.key;
                             if (overlayStyle === "underline") {
                                 return (
@@ -1639,7 +1857,29 @@ export default function OCRWorkspaceV2({ user, balance = 0, onDocumentProcessed,
 
                 {extractMode === "fulldoc" && fulldocResult && (
                     <>
-                        {fulldocResult.pages.map(pg => (
+                        {/* UI-7 UAT r5 #1 — Text / JSON tabs on fulldoc results.
+                            Same shape as field-mode tab bar so muscle memory holds. */}
+                        <div style={{
+                            display: "flex", gap: 2, marginBottom: 12,
+                            background: "var(--color-bg-elevated)",
+                            border: "1px solid var(--color-border)", borderRadius: 10, padding: 3,
+                        }}>
+                            {([
+                                ["text", t("ocr.v2.results.fulldocTabText")],
+                                ["json", t("ocr.v2.results.fulldocTabJson")],
+                            ] as ["text" | "json", string][]).map(([key, label]) => (
+                                <button key={key} onClick={() => setFulldocTab(key)}
+                                    style={{
+                                        flex: 1, padding: "7px 10px", fontSize: 12, fontWeight: 600,
+                                        background: fulldocTab === key ? "var(--color-bg-card)" : "transparent",
+                                        color: fulldocTab === key ? "var(--color-text-1)" : "var(--color-text-2)",
+                                        border: fulldocTab === key ? "1px solid var(--color-border-strong)" : "none",
+                                        borderRadius: 8, cursor: "pointer", fontFamily: "inherit",
+                                    }}>{label}</button>
+                            ))}
+                        </div>
+
+                        {fulldocTab === "text" && fulldocResult.pages.map(pg => (
                             <div key={pg.page} style={cardStyle}>
                                 <h4 style={{ ...cardHeadStyle }}>
                                     {t("ocr.v2.pageLabel", { n: pg.page })}
@@ -1653,6 +1893,33 @@ export default function OCRWorkspaceV2({ user, balance = 0, onDocumentProcessed,
                                 }}>{pg.text}</pre>
                             </div>
                         ))}
+
+                        {fulldocTab === "json" && (() => {
+                            const raw = JSON.stringify(fulldocResult.raw ?? fulldocResult, null, 2);
+                            return (
+                                <div>
+                                    <div style={{ display: "flex", gap: 6, justifyContent: "flex-end", marginBottom: 8 }}>
+                                        <button style={miniBtnStyle} onClick={() => navigator.clipboard.writeText(raw)}>
+                                            📋 {t("ocr.v2.results.jsonCopy")}
+                                        </button>
+                                        <button style={miniBtnStyle} onClick={() => {
+                                            const blob = new Blob([raw], { type: "application/json" });
+                                            const a = document.createElement("a");
+                                            a.href = URL.createObjectURL(blob);
+                                            a.download = `OCR_fulldoc_${Date.now()}.json`;
+                                            a.click();
+                                        }}>⬇ {t("ocr.v2.results.jsonDownload")}</button>
+                                    </div>
+                                    <pre style={{
+                                        background: "var(--color-bg-elevated)",
+                                        border: "1px solid var(--color-border)",
+                                        borderRadius: 10, padding: 14, fontFamily: "ui-monospace,Menlo,monospace",
+                                        fontSize: 11.5, lineHeight: 1.7, overflowX: "auto",
+                                        color: "var(--color-text-1)", whiteSpace: "pre",
+                                    }}>{raw}</pre>
+                                </div>
+                            );
+                        })()}
                     </>
                 )}
 
@@ -1725,8 +1992,77 @@ export default function OCRWorkspaceV2({ user, balance = 0, onDocumentProcessed,
                         <div style={{
                             fontSize: 11.5, textTransform: "uppercase", letterSpacing: "0.05em",
                             color: "var(--color-text-3)", fontWeight: 600,
-                        }}>{e.key}</div>
-                        <div style={{ fontSize: 13.5, marginTop: 2, whiteSpace: "pre-wrap" }}>{e.value}</div>
+                            display: "flex", alignItems: "center", gap: 6,
+                        }}>
+                            <span>{e.key}</span>
+                            {/* UI-7 UAT r6 Bug 2 — ⌗ glyph when highlight was skipped for this field. */}
+                            {highlightSkipByKey.get(e.key) && highlightSkipByKey.get(e.key) !== "table-type-skip" && (
+                                <span
+                                    title={t("ocr.v2.results.highlightSkipTip")}
+                                    style={{ color: "var(--color-text-4)", cursor: "help", fontSize: 12 }}>⌗</span>
+                            )}
+                        </div>
+                        {(() => {
+                            // OCR-10 quick win — v1-style <table> rendering for
+                            // table-type fields (was pretty JSON in r6). Cell-
+                            // edit is future scope; read-only for this round.
+                            const tableValue = e.fieldType === "table"
+                                ? (Array.isArray(e.raw?.value) ? e.raw.value : (Array.isArray(e.raw) ? e.raw : null))
+                                : null;
+                            if (tableValue) {
+                                if (tableValue.length === 0) {
+                                    return (
+                                        <div style={{ fontSize: 12.5, marginTop: 2, color: "var(--color-text-3)", fontStyle: "italic" }}>
+                                            {t("ocr.v2.results.emptyTable")}
+                                        </div>
+                                    );
+                                }
+                                const headers = Object.keys(tableValue[0] ?? {});
+                                return (
+                                    <div style={{
+                                        marginTop: 4, overflow: "auto",
+                                        border: "1px solid var(--color-border)",
+                                        borderRadius: 6, maxHeight: 280,
+                                    }}>
+                                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                                            <thead>
+                                                <tr style={{ background: "var(--color-bg-elevated)" }}>
+                                                    {headers.map(h => (
+                                                        <th key={h} style={{
+                                                            padding: "5px 8px", textAlign: "left",
+                                                            fontSize: 10.5, textTransform: "uppercase",
+                                                            color: "var(--color-text-3)",
+                                                            whiteSpace: "nowrap",
+                                                        }}>{h}</th>
+                                                    ))}
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {tableValue.map((row: any, ri: number) => (
+                                                    <tr key={ri} style={{ borderTop: "1px solid var(--color-border)" }}>
+                                                        {headers.map((h, ci) => (
+                                                            <td key={ci} style={{ padding: "4px 8px", fontSize: 12, color: "var(--color-text-1)" }}>
+                                                                {typeof row?.[h] === "object" && row?.[h] !== null
+                                                                    ? JSON.stringify(row[h])
+                                                                    : String(row?.[h] ?? "")}
+                                                            </td>
+                                                        ))}
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                );
+                            }
+                            return (
+                                <div style={{
+                                    fontSize: 13.5, marginTop: 2, whiteSpace: "pre-wrap",
+                                    fontFamily: e.isComplex ? "ui-monospace,Menlo,monospace" : "inherit",
+                                    maxHeight: e.isComplex ? 280 : undefined,
+                                    overflow: e.isComplex ? "auto" : undefined,
+                                }}>{e.value}</div>
+                            );
+                        })()}
                         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
                             {conf > 0 && (
                                 <span style={{
@@ -1785,19 +2121,34 @@ export default function OCRWorkspaceV2({ user, balance = 0, onDocumentProcessed,
                 );
             })}
             {/* Inline editor for selected field (below list) */}
-            {selectedFieldName && (
-                <div style={{ ...cardStyle, marginTop: 8 }}>
-                    <h4 style={cardHeadStyle}>{t("ocr.v2.results.editValue")}</h4>
-                    <input
-                        value={resultEntries.find(e => e.key === selectedFieldName)?.value || ""}
-                        onChange={ev => updateFieldValue(selectedFieldName, ev.target.value)}
-                        style={{
-                            width: "100%", padding: "8px 12px", borderRadius: 8,
-                            background: "var(--color-bg-panel)", color: "var(--color-text-1)",
-                            border: "1px solid var(--color-border-strong)", fontSize: 13,
-                        }} />
-                </div>
-            )}
+            {selectedFieldName && (() => {
+                const sel = resultEntries.find(e => e.key === selectedFieldName);
+                // UI-7 UAT r6 Bug 1 — complex values (table rows, nested
+                // objects) disable the inline edit input. Round-trip JSON
+                // editing is parked to UI-7b; without it a stray keystroke
+                // would corrupt the array shape.
+                const complex = !!sel?.isComplex;
+                return (
+                    <div style={{ ...cardStyle, marginTop: 8 }}>
+                        <h4 style={cardHeadStyle}>{t("ocr.v2.results.editValue")}</h4>
+                        <input
+                            disabled={complex}
+                            value={complex ? t("ocr.v2.results.editComplexPlaceholder") : (sel?.value || "")}
+                            onChange={ev => !complex && updateFieldValue(selectedFieldName, ev.target.value)}
+                            style={{
+                                width: "100%", padding: "8px 12px", borderRadius: 8,
+                                background: "var(--color-bg-panel)", color: "var(--color-text-1)",
+                                border: "1px solid var(--color-border-strong)", fontSize: 13,
+                                opacity: complex ? 0.6 : 1, cursor: complex ? "not-allowed" : "text",
+                            }} />
+                        {complex && (
+                            <p style={{ margin: "8px 0 0 0", fontSize: 11.5, color: "var(--color-text-3)" }}>
+                                {t("ocr.v2.results.editComplexNote")}
+                            </p>
+                        )}
+                    </div>
+                );
+            })()}
         </div>
     );
 
@@ -1950,40 +2301,24 @@ export default function OCRWorkspaceV2({ user, balance = 0, onDocumentProcessed,
     };
 
     // ─── RENDER ──────────────────────────────────────────────────────────
-    // UI-4c Chunk 2: single vs batch mode switch. When batch is picked, the
-    // whole body renders the legacy v1 workspace verbatim — no batch redesign.
-    // v1 handles multi-file drop / batch UI itself. The mode switch persists
-    // in v2 state so flipping back keeps v2 on its current stage.
+    // UI-7: batch mode now renders the v2-native OCRBatchViewV2 instead of
+    // embedding v1 verbatim (that was the UI-4c stopgap). D8: rollback path
+    // = `ENABLE_OCR_WORKSPACE_V2 = false` (whole v2 workspace disappears and
+    // v1 handles both single + batch byte-identical).
     if (uiMode === "batch") {
         return (
-            <div style={{
-                display: "flex", flexDirection: "column",
-                minHeight: "calc(100vh - 92px)",
-                background: "var(--color-bg-surface)",
-                color: "var(--color-text-1)",
-                border: "1px solid var(--color-border)",
-                borderRadius: 12, overflow: "hidden",
-            }}>
-                {/* UI-4c 3c-1 + 3c-2: dropped in-component "OCR Workspace"
-                    title (app TopBar renders it already) and in-component credit
-                    chip (duplicated TopBar "เครดิต"). Only the single/batch mode
-                    switch remains, right-aligned. */}
-                <div style={{
-                    display: "flex", alignItems: "center", justifyContent: "flex-end",
-                    gap: 10,
-                    padding: "10px 20px", background: "var(--color-bg-panel)",
-                    borderBottom: "1px solid var(--color-border)",
-                }}>
-                    <QuickModeToggle quickMode={quickMode} onChange={setQuickMode} t={t} />
-                    <ModeSwitch mode={uiMode} onChange={setUiMode} t={t} />
-                </div>
-                <OCRWorkspaceV1
-                    user={user}
-                    balance={balance}
-                    onDocumentProcessed={onDocumentProcessed}
-                    onNavigateToBilling={onNavigateToBilling}
-                />
-            </div>
+            <OCRBatchViewV2
+                user={user}
+                balance={balance}
+                onDocumentProcessed={onDocumentProcessed}
+                onNavigateToBilling={onNavigateToBilling}
+                headerRight={
+                    <>
+                        <QuickModeToggle quickMode={quickMode} onChange={setQuickMode} t={t} />
+                        <ModeSwitch mode={uiMode} onChange={setUiMode} t={t} />
+                    </>
+                }
+            />
         );
     }
 
@@ -2375,226 +2710,6 @@ function QuickModeToggle({ quickMode, onChange, t }: {
     );
 }
 
-// ─── UI-6 §A: Template picker panel ──────────────────────────────────────
-// Replaces the flat <select>: search + ⭐ Favorites + 🕐 Recent + 📋 All
-// sections. Every row shows a star toggle. Currently-loaded template is
-// highlighted; a "● แก้ไข" pill shows if fields diverge from the snapshot.
-interface TemplatePickerPanelProps {
-    templates: { id: string; name: string; fields_json: string; user_id?: string }[];
-    activeTemplateId: string | null;
-    activeTemplateName: string | null;
-    favoriteIds: string[];
-    recentIds: string[];
-    defaultTemplateId: string | null;
-    dirty: boolean;
-    search: string;
-    onSearch: (s: string) => void;
-    onApply: (id: string | null) => void;
-    onToggleFavorite: (id: string) => void;
-    onSetDefault: (id: string | null) => void;
-    onSaveAsNew: () => void;
-    onUpdateActive: () => void;
-    onDelete: (id: string) => void;
-    savingTemplate: boolean;
-    t: (k: string, vars?: any) => string;
-}
-function TemplatePickerPanel(p: TemplatePickerPanelProps) {
-    const q = p.search.trim().toLowerCase();
-    const matches = (n: string) => q === "" || n.toLowerCase().includes(q);
-    // Inline delete confirmation — id of the row currently prompting.
-    const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
-    const isSystemTemplate = (tpl: { id: string; user_id?: string }) =>
-        tpl.user_id === "system" || tpl.id.startsWith("global-");
-
-    const favTemplates = p.templates.filter(x => p.favoriteIds.includes(x.id) && matches(x.name));
-    const recentTemplates = p.recentIds
-        .map(id => p.templates.find(x => x.id === id))
-        .filter((x): x is NonNullable<typeof x> => !!x && matches(x.name));
-    const allTemplates = p.templates.filter(x => matches(x.name));
-
-    const renderRow = (tpl: { id: string; name: string; user_id?: string }) => {
-        const isActive = tpl.id === p.activeTemplateId;
-        const isFav = p.favoriteIds.includes(tpl.id);
-        const isDefault = tpl.id === p.defaultTemplateId;
-        const isSystem = isSystemTemplate(tpl);
-        const isConfirming = confirmingDeleteId === tpl.id;
-        return (
-            <div key={tpl.id}
-                onClick={() => { if (!isConfirming) p.onApply(tpl.id); }}
-                className="ocr-v2-tpl-row"
-                style={{
-                    display: "flex", alignItems: "center", gap: 8,
-                    padding: "6px 8px", borderRadius: 8, cursor: "pointer",
-                    background: isActive ? "var(--color-accent-dim)" : "transparent",
-                    border: isActive ? "1px solid var(--color-accent-border)" : "1px solid transparent",
-                    fontSize: 12.5,
-                }}>
-                <button
-                    onClick={e => { e.stopPropagation(); p.onToggleFavorite(tpl.id); }}
-                    title={isFav ? p.t("ocr.v2.templatePicker.unfavorite") : p.t("ocr.v2.templatePicker.favorite")}
-                    style={{
-                        background: "transparent", border: "none",
-                        color: isFav ? "#f59e0b" : "var(--color-text-4)",
-                        cursor: "pointer", fontSize: 14, padding: 0, lineHeight: 1,
-                    }}>{isFav ? "★" : "☆"}</button>
-                <span style={{ flex: 1, color: "var(--color-text-1)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {tpl.name}
-                </span>
-                {isDefault && (
-                    <span style={{
-                        fontSize: 9.5, padding: "1px 6px", borderRadius: 4,
-                        background: "var(--color-accent)", color: "#0a1628", fontWeight: 700,
-                    }}>{p.t("ocr.v2.templatePicker.default")}</span>
-                )}
-                {isActive && (
-                    <span style={{ fontSize: 12, color: "var(--color-accent)" }}>✓</span>
-                )}
-                {/* 🗑 delete button — hidden for system templates. Ghost by
-                    default; hover reveals full contrast via the .ocr-v2-tpl-row
-                    hover CSS below. Click enters inline-confirm mode which
-                    replaces the delete glyph with ✓/✗ actions. */}
-                {isSystem ? (
-                    <span
-                        title={p.t("ocr.v2.templatePicker.delete.systemLocked")}
-                        aria-label={p.t("ocr.v2.templatePicker.delete.systemLocked")}
-                        style={{
-                            fontSize: 12, color: "var(--color-text-4)",
-                            opacity: 0.35, padding: "0 2px", lineHeight: 1,
-                        }}>🔒</span>
-                ) : isConfirming ? (
-                    <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}
-                        onClick={e => e.stopPropagation()}>
-                        <span style={{ fontSize: 10.5, color: "var(--color-danger)", marginRight: 2 }}>
-                            {p.t("ocr.v2.templatePicker.delete.confirm")}
-                        </span>
-                        <button
-                            onClick={e => {
-                                e.stopPropagation();
-                                setConfirmingDeleteId(null);
-                                p.onDelete(tpl.id);
-                            }}
-                            style={{
-                                background: "var(--color-danger)", color: "#fff",
-                                border: "none", borderRadius: 4,
-                                padding: "1px 6px", fontSize: 10.5, fontWeight: 700,
-                                cursor: "pointer", fontFamily: "inherit",
-                            }}>{p.t("ocr.v2.templatePicker.delete.yes")}</button>
-                        <button
-                            onClick={e => { e.stopPropagation(); setConfirmingDeleteId(null); }}
-                            style={{
-                                background: "var(--color-bg-elevated)",
-                                color: "var(--color-text-2)",
-                                border: "1px solid var(--color-border)", borderRadius: 4,
-                                padding: "1px 6px", fontSize: 10.5, fontWeight: 700,
-                                cursor: "pointer", fontFamily: "inherit",
-                            }}>{p.t("ocr.v2.templatePicker.delete.no")}</button>
-                    </span>
-                ) : (
-                    <button
-                        className="ocr-v2-tpl-delete"
-                        onClick={e => {
-                            e.stopPropagation();
-                            setConfirmingDeleteId(tpl.id);
-                        }}
-                        title={p.t("ocr.v2.templatePicker.delete.button")}
-                        aria-label={p.t("ocr.v2.templatePicker.delete.button")}
-                        style={{
-                            background: "transparent", border: "none",
-                            color: "var(--color-text-4)",
-                            cursor: "pointer", fontSize: 12, padding: "0 2px",
-                            lineHeight: 1, opacity: 0.4,
-                            transition: "opacity 0.15s ease, color 0.15s ease",
-                        }}>🗑</button>
-                )}
-            </div>
-        );
-    };
-
-    return (
-        <div style={cardStyle}>
-            {/* Hover reveals the ghost delete button at full contrast. */}
-            <style>{`
-                .ocr-v2-tpl-row:hover .ocr-v2-tpl-delete { opacity: 1; color: var(--color-danger); }
-                .ocr-v2-tpl-delete:hover { opacity: 1 !important; color: var(--color-danger) !important; }
-            `}</style>
-            <h4 style={cardHeadStyle}>
-                <span>{p.t("ocr.v2.templatePicker.head")}</span>
-                {p.activeTemplateId && (
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                        {p.dirty && (
-                            <span style={{
-                                fontSize: 10, padding: "1px 6px", borderRadius: 4,
-                                background: "rgba(245,158,11,0.15)",
-                                color: "var(--color-warning)",
-                                border: "1px solid rgba(245,158,11,0.35)", fontWeight: 700,
-                            }}>● {p.t("ocr.v2.templatePicker.dirty")}</span>
-                        )}
-                        <button
-                            onClick={() => p.onApply(null)}
-                            style={{
-                                background: "transparent", border: "none",
-                                color: "var(--color-text-3)", fontSize: 11, cursor: "pointer",
-                                fontFamily: "inherit",
-                            }}>
-                            {p.t("ocr.v2.templatePicker.clear")}
-                        </button>
-                    </span>
-                )}
-            </h4>
-            <input value={p.search}
-                onChange={e => p.onSearch(e.target.value)}
-                placeholder={p.t("ocr.v2.templatePicker.searchPh")}
-                style={{
-                    width: "100%", padding: "6px 10px", borderRadius: 8,
-                    background: "var(--color-bg-panel)", color: "var(--color-text-1)",
-                    border: "1px solid var(--color-border)", fontSize: 12,
-                    fontFamily: "inherit", marginBottom: 8,
-                }} />
-            <div style={{ maxHeight: 240, overflowY: "auto" }}>
-                {favTemplates.length > 0 && (
-                    <div>
-                        <div style={pickerSectionHead}>⭐ {p.t("ocr.v2.templatePicker.favSection")}</div>
-                        {favTemplates.map(renderRow)}
-                    </div>
-                )}
-                {recentTemplates.length > 0 && (
-                    <div>
-                        <div style={pickerSectionHead}>🕐 {p.t("ocr.v2.templatePicker.recentSection")}</div>
-                        {recentTemplates.map(renderRow)}
-                    </div>
-                )}
-                <div>
-                    <div style={pickerSectionHead}>📋 {p.t("ocr.v2.templatePicker.allSection")}</div>
-                    {allTemplates.length === 0
-                        ? <p style={{ margin: 0, padding: "6px 8px", fontSize: 11.5, color: "var(--color-text-3)" }}>
-                            {p.t("ocr.v2.templatePicker.empty")}
-                          </p>
-                        : allTemplates.map(renderRow)}
-                </div>
-            </div>
-            {/* Save semantics — UI-6 §A2 */}
-            <div style={{ display: "flex", gap: 6, marginTop: 10, borderTop: "1px solid var(--color-border)", paddingTop: 10 }}>
-                <button style={{ ...miniBtnStyle, flex: 1, padding: "6px 10px" }}
-                    disabled={p.savingTemplate}
-                    onClick={p.onSaveAsNew}>
-                    + {p.t("ocr.v2.templatePicker.saveAsNew")}
-                </button>
-                <button style={{
-                        ...miniBtnStyle, flex: 1, padding: "6px 10px",
-                        color: p.activeTemplateId ? "var(--color-accent)" : "var(--color-text-4)",
-                        borderColor: p.activeTemplateId ? "var(--color-accent-border)" : "var(--color-border)",
-                    }}
-                    disabled={!p.activeTemplateId || p.savingTemplate}
-                    title={!p.activeTemplateId ? p.t("ocr.v2.templatePicker.updateDisabledTip") : ""}
-                    onClick={p.onUpdateActive}>
-                    ↻ {p.activeTemplateName
-                        ? p.t("ocr.v2.templatePicker.updateActive", { name: p.activeTemplateName })
-                        : p.t("ocr.v2.templatePicker.updateDisabled")}
-                </button>
-            </div>
-        </div>
-    );
-}
 
 // ─── Simple modal scrim ────────────────────────────────────────────────
 function ModalScrim({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
@@ -2619,11 +2734,6 @@ const modalCardStyle: React.CSSProperties = {
     color: "var(--color-text-1)",
 };
 
-const pickerSectionHead: React.CSSProperties = {
-    fontSize: 10.5, textTransform: "uppercase", letterSpacing: "0.08em",
-    color: "var(--color-text-3)", fontWeight: 700,
-    padding: "6px 8px 2px",
-};
 
 // ─── Mode switch (single / batch topbar segmented control, UI-4c 2) ──────
 function ModeSwitch({ mode, onChange, t }: {

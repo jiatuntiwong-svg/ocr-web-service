@@ -1,6 +1,6 @@
 # Cloudflare Workers → Self-hosted Docker Migration
 
-> **Status:** Handoff doc · 2026-06-14
+> **Status:** Handoff doc · written 2026-06-14, refreshed 2026-07-16
 > **Audience:** Receiving engineering team
 > **Goal:** Reproduce the current Cloudflare Workers production app on Docker
 > (PostgreSQL + S3-compatible storage + direct Gemini API + Redis), keeping
@@ -8,7 +8,40 @@
 >
 > **Production reference:** https://ocr-web-service.jiatuntiwong.workers.dev
 > **Owner contact:** project owner (GitHub: jiatuntiwong-svg)
-> **Target deadline:** ~2 weeks from handoff
+> **Target deadline:** ~2 weeks from handoff — **re-baseline this against
+> the actual handoff date**, this doc has sat 5+ weeks since it was
+> originally written and a full OCR Stabilization sprint shipped in the
+> meantime (see the 2026-07-16 refresh notes below).
+>
+> **2026-07-16 refresh notes (what changed since this doc was written):**
+> - AI calls are no longer "just Gemini" — `src/lib/ai-handler.ts` now
+>   dispatches across **4 providers** (`gemini`, `openai`, `openrouter`,
+>   `vertex_ai`), admin-configurable, no code change needed to add a key.
+>   §4.3 below undersells this; preserve the provider dispatch, don't
+>   collapse it back to a single hardcoded Gemini call.
+> - Credit charging goes through a shared helper,
+>   `chargeCreditsAtomic()` in `src/lib/credits.ts`, used by **both**
+>   `/api/upload` and `/api/v1/extract` — and the credit *model* itself
+>   (`per_page` default / `field_formula` / `per_file`) is a runtime
+>   switch read from `system_settings`, not a code constant. See §4.1 and
+>   §5 updates below.
+> - `/api/upload` and `/api/v1/extract` both gained a `mode=fulldoc` path
+>   (whole-document transcription instead of field extraction) — same
+>   D1/R2/AI call shape, just a different prompt profile and response
+>   shape. No new abstraction needed, but don't assume "OCR" only ever
+>   means field-extraction when refactoring these routes.
+> - A v2 OCR workspace (stepper UI, `ENABLE_OCR_WORKSPACE_V2` flag) and a
+>   v2-native batch view are live in prod — pure frontend, no bearing on
+>   this migration's backend scope, but if the receiving team is also
+>   asked to verify UI parity, know that "the OCR page" now means the v2
+>   shell, not the original single-panel layout this doc's screenshots
+>   (if any existed) would have shown.
+>
+> None of the above changes the migration's shape (still D1→Postgres,
+> R2→MinIO, `env.AI`→direct SDK calls, `ctx.waitUntil`→BullMQ) — they're
+> additive within the same call sites already described below. Treat the
+> file-by-file map in §4 as still correct; the notes above are things to
+> not accidentally regress.
 
 ---
 
@@ -101,9 +134,24 @@ export interface DB {
 
 Then refactor each `env.DB.prepare(...)` call site. Approx 30 call sites,
 mostly in `src/app/api/**/*.ts`. The largest are:
-- [`src/app/api/upload/route.ts`](../src/app/api/upload/route.ts) — atomic credit charge UPDATE
+- [`src/lib/credits.ts`](../src/lib/credits.ts) — `chargeCreditsAtomic(env, userId, amount)`,
+  the single guarded-UPDATE helper shared by **both**
+  [`src/app/api/upload/route.ts`](../src/app/api/upload/route.ts) and
+  [`src/app/api/v1/extract/route.ts`](../src/app/api/v1/extract/route.ts)
+  as of the BILL-1 sprint task — port this one function and both routes'
+  credit-safety follows, rather than reimplementing the guard twice.
 - [`src/app/api/compare/route.ts`](../src/app/api/compare/route.ts) — credit check + post-run adjust
 - [`src/app/api/admin/users/route.ts`](../src/app/api/admin/users/route.ts) — admin user list + edit
+
+**Runtime-switchable config lives in `system_settings`, not just static
+tables.** Two D1 rows matter beyond the obvious business tables:
+`system_settings.CREDIT_MODEL` (`per_page` / `field_formula` / `per_file`,
+read by `getActiveCreditModel(env)`) and `system_settings.AI_POWER_CONFIG`
+(JSON array of provider configs — keys, models, which provider is active).
+Both are admin-editable at runtime with no redeploy on Cloudflare; the
+Postgres port needs the same "read config from DB, not from env/code" path
+preserved, or admins lose the ability to switch credit models / AI
+providers without a deploy.
 
 ### 4.2 Object storage — `env.BUCKET`
 
@@ -129,10 +177,22 @@ Call sites:
 
 CF Workers AI provides a binding that proxies to several model providers.
 The current code in [`src/lib/ai-handler.ts`](../src/lib/ai-handler.ts)
-already calls the Google Generative AI SDK directly when keys are provided
-via env vars — so this is the *cleanest* swap. Replace any `env.AI.run(...)`
-paths (search for `env.AI`) with the existing direct-SDK path keyed by
-`GEMINI_API_KEY`.
+already calls model providers directly (not through the CF binding) when
+keys are provided — so this is the *cleanest* swap. Replace any
+`env.AI.run(...)` paths (search for `env.AI`) with the existing direct
+path.
+
+**Important — this is multi-provider, not just Gemini.** `generateWithAI(req)`
+dispatches on a `provider` string across **four** paths: `gemini` (`@google/generative-ai`
+SDK), `openai` (fetch), `openrouter` (fetch), and `vertex_ai` (fetch to the
+Vertex Express endpoint, `x-goog-api-key` header — added after this doc was
+first written, see `pm/reports/AI-1.md`). Provider + model + key are stored
+per-config in `system_settings.AI_POWER_CONFIG` (D1), editable in Admin →
+API Settings, with keys always returned masked to the client and never
+logged in the clear (`src/lib/redactSecrets.ts`). Preserve this whole
+abstraction — don't refactor it down to a single hardcoded Gemini call, and
+carry the masking/no-logging behavior into whatever settings UI the Docker
+build ships.
 
 ### 4.4 Edge cache — `caches.default`
 
@@ -228,17 +288,18 @@ db/migrations/default_templates.sql
 db/migrations/confidence_and_notifications.sql
 ```
 
-**Important — atomic credit charge:** the upload route relies on this query
-to be atomic so two parallel uploads can't overdraw a user's balance:
-```sql
-UPDATE users SET
-  credits_remaining = MAX(0, credits_remaining - ?),
-  extra_credits     = extra_credits - MAX(0, ? - credits_remaining)
-WHERE id = ? AND (credits_remaining + extra_credits) >= ?
-RETURNING credits_remaining + extra_credits AS remaining
-```
-Postgres supports the same `MAX(...)` and `RETURNING` syntax — no rewrite
-needed, just make sure the driver passes `RETURNING` results back.
+**Important — atomic credit charge:** both the upload route and the public
+`/api/v1/extract` route rely on a guarded UPDATE (drain `credits_remaining`
+first, then spill into `extra_credits`, `WHERE (credits_remaining +
+extra_credits) >= ?`) so parallel requests can't overdraw a user's balance.
+This is now centralized in `chargeCreditsAtomic(env, userId, amount)` at
+[`src/lib/credits.ts`](../src/lib/credits.ts) rather than duplicated inline
+per route (it wasn't, prior to the BILL-1 sprint task — `/api/v1/extract`
+had its own unguarded `UPDATE ... - 1` that has since been fixed to call
+the same helper as `/api/upload`). Port this one function; both call sites
+inherit the fix. Postgres supports the same `MAX(...)`-style guard and
+`RETURNING` syntax — no rewrite needed, just make sure the driver passes
+`RETURNING` results back.
 
 ---
 
@@ -320,22 +381,39 @@ files the migration team will be refactoring anyway.
 - **Auth:** `email` + `password` sent in every form-data body. Password is
   verified against the PBKDF2 hash and silently rehashed on success.
 - **Access gate:** admin role only + tier feature flag `public_api`.
-- **Credit charge:** deducted **before** the AI call, in two separate
-  non-atomic UPDATEs (`credits_remaining` first, then `extra_credits`).
+- **Credit charge:** ⚠️ **updated since this doc was first written** — now
+  charged atomically **before** the AI call via `chargeCreditsAtomic()`
+  (`src/lib/credits.ts`, shared with `/api/upload`, landed in BILL-1), and
+  **refunded atomically via `refundCreditsAtomic()` if the AI call fails**
+  (quota/429, timeout, malformed response — landed in API-4b, 2026-07-12).
+  So the race condition from the original audit is fixed and credits are no
+  longer silently burned on AI failure — but note the mechanism is
+  charge-then-refund-on-failure, not the originally-suggested
+  pre-authorize-then-charge-on-success. There is still a narrow window where
+  a crashed request (process killed between charge and refund) could leave
+  credits deducted with no result — worth deciding during the migration
+  whether the Postgres/queue version should move to true
+  pre-authorize/capture instead.
 - **Response:** synchronous JSON (AI runs inline, can hit Worker 30s limit).
 - **Error format:** `fail()` from `src/lib/apiResponse.ts` with `detail`
-  echoing the raw error (potentially leaking internals).
+  redacted via `src/lib/redactSecrets.ts` before logging (added in AI-1) —
+  `detail` is not returned to the client on this route already, only
+  logged server-side, and is now scrubbed of API keys/headers there too.
 - **No rate limit, no idempotency key, no request-size guard, no audit log,
-  no CORS, no SDK, no OpenAPI doc.**
-- Prompt is hardcoded Thai-first (see line 96-102 of the route).
+  no CORS, no SDK, no OpenAPI doc.** (Still true as of 2026-07-16 — API-5,
+  the public self-service API, is queued but not started; see
+  `docs/PENDING_FEATURES_BACKLOG.md`.)
+- Prompt is hardcoded Thai-first (see line 96-102 of the route), though
+  `mode=fulldoc` (added in API-4) now also accepts a full-document
+  transcription request on this same route alongside field-extraction.
 
 ### 9.2 Critical fixes (MUST land before opening to external customers)
 
 | # | Issue | Suggested fix |
 |--|--|--|
 | 1 | Email + password auth on every call | Add `api_keys` table (id, user_id, prefix, hash, scopes, created_at, last_used_at, revoked_at). Accept `Authorization: Bearer sk_xxx`. Hash the secret half (don't store plaintext). Add Settings UI for users to create / revoke. |
-| 2 | Credit charged before AI call | Reuse the `/api/upload` pattern: pre-authorize, run AI, **then** atomic charge on success. Failure path = no charge. |
-| 3 | Non-atomic credit deduction (race) | Replace with the single-statement guarded `UPDATE … WHERE … >= ? RETURNING …` already used by upload. See §5 "atomic credit charge". |
+| 2 | Credit charged before AI call | ✅ **Mitigated 2026-07-12 (API-4b)** — atomic charge before the call, atomic refund if the call fails. Still not true pre-authorize/capture (see note in §9.1); consider finishing that during the migration if a queue-based async path makes it easy. |
+| 3 | Non-atomic credit deduction (race) | ✅ **Done 2026-07-09 (BILL-1)** — both `/api/upload` and `/api/v1/extract` now call the same `chargeCreditsAtomic()` guarded UPDATE. See §5 "atomic credit charge". |
 | 4 | No rate limit | Per-API-key sliding window. Recommend storing counters in Redis (post-migration) with TTL = window. Limits per tier: e.g. Pro = 60/min / 1000/day. Return `X-RateLimit-Remaining` / `X-RateLimit-Reset`. |
 | 5 | No request-size guard | Reject `file.size > N` before reading. Tier-dependent cap (e.g. Pro 10MB, Enterprise 50MB). Return `413 Payload Too Large`. |
 

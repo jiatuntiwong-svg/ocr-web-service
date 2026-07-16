@@ -27,6 +27,10 @@
     "multi-column": {
       "label": "Multi-column",
       "description": "Columnar disambiguation — two adjacent labels with semantically similar siblings. Model must return the target column's value. Also covers verbatim + corrections_report in 2-col layouts (OCR-2 issue 1.1/1.4)."
+    },
+    "multi-page": {
+      "label": "Multi-page",
+      "description": "Same-name field appears on multiple pages with different values. Prior behavior returned only page-1 value; SHARED_RULES_VERSION 2026-07-15-v3 (OCR-9) adds a rule that model must return page-tagged joined string like '[หน้า 1: X | หน้า 2: Y]'. Guards regression back to single-page-only behavior."
     }
   },
   "cases": [
@@ -221,6 +225,20 @@
       "expected": { "expected": "Plastelet" },
       "min_pass_rate": 0.8,
       "guards_issue": "docs/OCR_TESTING_LOG.md#11-ai-แกตัดคำเอง"
+    },
+    {
+      "id": "multipage-same-field-different-values",
+      "category": "multi-page",
+      "fixture": "test_fixtures/regression/multi-page/generated/multipage-same-field-different-values.pdf",
+      "template": "${OCR_E2E_REGRESSION_TEMPLATE}",
+      "field": "เลขที่เอกสาร",
+      "assertion": "multiline",
+      "expected": {
+        "lines": ["DOC-001", "DOC-002"]
+      },
+      "min_pass_rate": 0.66,
+      "guards_issue": "pm/reports/OCR-9.md",
+      "notes": "OCR-9: PDF has same-name field 'เลขที่เอกสาร' on 2 pages with different values (DOC-001, DOC-002). Prior behavior returned only page-1 value. SHARED_RULES v2026-07-15-v3 rule requires page-tagged joined string containing BOTH values. Assertion `multiline` succeeds when both DOC-001 and DOC-002 appear in the returned string with any separator (e.g. '[หน้า 1: DOC-001 | หน้า 2: DOC-002]'). Field 'เลขที่เอกสาร' must exist in OCR_E2E_REGRESSION_TEMPLATE."
     },
     {
       "id": "corrections-recieve",

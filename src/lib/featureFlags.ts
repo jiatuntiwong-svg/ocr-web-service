@@ -54,6 +54,17 @@ export const ENABLE_TEMPLATE_RULEBASE = true;
 // See: docs/080726/OCR_IMPROVEMENT_TECHNIQUES_KB.md §2, pm/reports/S2-2.md
 export const ENABLE_PROMPT_PROFILES = true;
 
+// ─── OCR highlight validation (OCR-10 Phase 1 quick win) ────────────────
+// Reuse Compare's text-layer + search pipeline (`getPageTextLayer` +
+// `findInTextLayer`) to VALIDATE the AI-supplied bbox for each OCR result
+// entry. For text-based PDFs the validated bbox lands exactly on the text
+// run instead of near-miss/off-page AI guesses. Fallback = existing r6
+// sanity-guarded AI bbox path (no regression). Table-type fields skip
+// validation entirely (whole-table needles never match a single run).
+// Flag OFF = OCR-10-r6 behaviour, byte-identical.
+// See: pm/reports/OCR-10-quickwin.md
+export const ENABLE_OCR_HIGHLIGHT_VALIDATION = true;
+
 // ─── Dual-scale crops (OCR-8b Rung 3) ──────────────────────────────────
 // Rasterize each hinted field's crop at TWO DPIs (hi = CROP_DPI_SCALE×,
 // lo = standard) and send both images to the crop pass. Shared rules

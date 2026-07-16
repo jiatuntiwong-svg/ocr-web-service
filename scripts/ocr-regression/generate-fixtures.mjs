@@ -29,7 +29,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..", "..");
 const rootSrc = path.join(repoRoot, "test_fixtures", "regression");
 
-const CATEGORIES = ["thai-form", "dense", "landscape", "tables", "multi-column"];
+const CATEGORIES = ["thai-form", "dense", "landscape", "tables", "multi-column", "multi-page"];
 
 function parseArgs(argv) {
   const out = {};

@@ -2,7 +2,10 @@
 
 > **Purpose:** Owner-side checklist for verifying that the Docker build
 > behaves identically to the Cloudflare production app.
-> **Snapshot date:** 2026-07-11 (OCR Stabilization sprint close, deploy `a878584d`)
+> **Snapshot date:** 2026-07-16 (extends the 2026-07-11 OCR Stabilization
+> sprint-close snapshot with Sprint 2 items shipped since: UI-7 batch v2,
+> OCR-8/8b landscape dual-scale, API-4/API-4b fulldoc mode, OCR-9 multi-page
+> same-field rule. Latest deploy referenced: `fb169356`, 2026-07-13.)
 > **Production URL:** https://ocr-web-service.jiatuntiwong.workers.dev
 >
 > Use this doc to:
@@ -10,6 +13,17 @@
 >    behavior (the receiving team will reproduce it).
 > 2. Replay the same flows on the Docker build and compare outcomes.
 > 3. Sign off when every row in §6 (acceptance matrix) matches.
+>
+> **2026-07-16 sync note:** §4.2 (fulldoc row) and §6 rows 41-44 were
+> updated/added in this pass to close the gap the docs-manager agent
+> flagged in `pm/reports/DOC-1-sprint-close.md` ("§6 acceptance matrix
+> still references the pre-v2 workspace... left alone to avoid churning
+> the migration audit"). This pass folds in everything that shipped
+> between the 2026-07-11 sprint close and 2026-07-16, grounded in
+> `pm/BOARD.md` + the individual `pm/reports/*.md` for each item — it has
+> **not** re-derived every claim from source line numbers the way the
+> original DOC-1 pass did, so treat the new rows as report-verified,
+> not code-verified, and spot-check before a real sign-off.
 
 ---
 
@@ -90,7 +104,7 @@ result overflow menu), stage-machine driven so ⚡ Quick mode can auto-advance.
 |--|--|--|
 | Click "OCR" in NavRail | v2 workspace loads with the stepper collapsed to step 1 (Upload). No template rail — templates picked in step 3 via `<TemplatePickerPanel>` (⭐ favourites / 🕐 recent / 📋 all + delete). System templates cannot be deleted (button disabled with tooltip); user templates get inline-confirm delete with optimistic reconcile | `pm/reports/UI-4c.md`, `pm/reports/UI-6.md`, `pm/reports/UI-6-delete.md` |
 | Toggle ⚡ Quick mode (topbar) | Auto-advances Upload → Pages → Extract on file drop when a default template + fields are already set. Credit-confirm dialog still fires (never bypassed) | UI-6 §B |
-| Toggle "Full document" (topbar mode switch) | Extraction sends the whole document instead of the field-list prompt. Result table renders per-page pages. Server side of fulldoc is still Sprint 2 (API-4 / S2-2) | UI-4c §3d |
+| Toggle "Full document" (topbar mode switch) | Extraction sends the whole document instead of the field-list prompt. Result view renders one text block per page (copy button per page) + export as .txt/.md/.docx (Excel/CSV hidden — doesn't apply). Backend went live with API-4 (curl UAT passed 2026-07-13); response shape is `{ data: { pages: [{page, text}] } }`, `_meta.partial: true` if the model didn't return valid per-page JSON (falls back to a single raw dump) | UI-4c §3d, `pm/reports/API-4.md` |
 | Toggle "Show hint boxes" (topbar) | Overlays saved `bbox_hint` rectangles on the preview; drawing/edit is a separate expander in step 3 | UI-4c §3e |
 | Pick a template that has 5 fields | Fields chip row populates with 5 chips |  |
 | Drop a Thai PDF | Preview appears in left panel + "Extract" button enabled |  |
@@ -122,6 +136,8 @@ Two things happen when a field has a hint:
 | Server merge policy: for hinted fields only, a non-null crop value **replaces** the whole-image value and the field object gains `source: "crop"`; a null crop value keeps the whole-image value and flags `crop_miss: true` in `raw_json` | Non-hinted fields are untouched; unknown crop keys are ignored |
 | Metering | Both AI calls' tokens accumulate into a single `ai_usage` row; the user is charged once per operation (unchanged) |
 | Backward-compat | Uploads without hints / without `field_crops` follow the pre-OCR-6 path exactly. Public API `/api/v1/extract` does NOT participate in the crop pass (per OCR-4 decision) |
+| Landscape / dense-page legibility | Hinted crops on landscape A4 pages are sent at two scales (hi 7200px + lo 3600px, `ENABLE_DUAL_SCALE_CROPS`) and reconciled by a shared multi-scale prompt rule — fixes a deterministic glyph-drop the model had at single-scale (e.g. missing "รับบริจาค"). Benchmark: 36/36 = 100% across categories as of deploy `fb169356` (2026-07-13) | `pm/reports/OCR-8.md`, `pm/reports/OCR-8b.md` |
+| Same field label appears on 2+ pages with different values | Model returns a single joined string `"[หน้า 1: X \| หน้า 2: Y]"` instead of silently keeping only page 1's value. If all pages have the same value, returns that single value with no page prefix. This is a prompt-rule fix (shared rules v2026-07-15-v3), not a schema change — the field stays a plain string | `pm/reports/OCR-9.md`. Structured multi-value (`values: [{page, value}]`) deferred to follow-up OCR-9b if needed |
 
 Reference: `pm/reports/OCR-6.md`, `pm/reports/OCR-6b.md` (prompt-parity + merge-provenance fix),
 `pm/reports/OCR-6c.md` (hint coordinate space = pdfjs raster), `src/lib/field-crops.ts`,
@@ -164,6 +180,25 @@ the helper so the two paths cannot drift.
 Reference: `src/lib/pricing.ts` (`CreditModel`, `DEFAULT_CREDIT_MODEL`),
 `src/lib/credits.ts`, `pm/reports/BILL-1.md`,
 `docs/CREDIT_PRICING_SUMMARY.md`.
+
+#### 4.2d Batch mode (v2-native, since UI-7 / deploy `fb169356`)
+
+Toggling "หลายไฟล์" (multiple files) in the topbar mode switch no longer
+opens the legacy `OCRWorkspace.tsx` embed — since UI-7 it mounts a
+self-contained `OCRBatchViewV2.tsx` with its own state and stepper.
+
+| Behavior | Notes |
+|--|--|
+| Same 6-step shell (upload → pages → fields → run → results → export) as single-file v2 | One shared field/template selection applies to every file in the batch — no per-file template override |
+| Per-file page picker | Each uploaded file gets its own tab with its own page selection; a file over the page cap shows `⚠ (N/M)` and blocks advancing until reduced |
+| Sequential extraction, not parallel | Files run one at a time with a small pacing delay between them (deliberately more conservative than v1's concurrency of 3, to keep headroom against AI rate limits) |
+| Credit estimate | `CreditConfirmDialog` shows a per-file breakdown row plus a Total row; the existing T1-T4 smart-confirm triggers still apply, evaluated against the batch total — batch cannot bypass confirmation |
+| Results | Spreadsheet-style table: one row per file, columns = union of field keys across the batch, each cell shows value + confidence badge |
+| Full-document mode combined with batch | Allowed — each file transcribes independently |
+| Rollback | Flipping `ENABLE_OCR_WORKSPACE_V2` off restores the pre-UI-7 behavior (single + batch both fall back to v1 verbatim) — `OCRWorkspace.tsx` was left byte-identical (md5-verified) by this change |
+
+Reference: `pm/reports/UI-7.md`, `pm/reports/UI-7-uat-r1.md` through `r6`,
+`src/components/OCRBatchViewV2.tsx`.
 
 ### 4.3 Compare Workspace (2-3 docs diff)
 
@@ -339,6 +374,11 @@ Owner ticks each row after running on Docker build. Sign + date at bottom.
 | 38 | Error responses do not contain stack traces / file paths | ☐ | ☐ | Owner checks any error response body |
 | 39 | `X-Request-Id` on every response + matching `api_calls` row | n/a | ☐ |  |
 | 40 | Async sibling endpoint completes large jobs without timeout | n/a | ☐ | Test with multi-page PDF |
+| **Sprint 2 additions (added 2026-07-16, not yet owner-ticked on CF)** |  |  |  |  |
+| 41 | Batch mode: multi-file upload, per-file page picker, sequential run, spreadsheet results | ☐ | ☐ | v2-native since UI-7, `deploy fb169356` |
+| 42 | Full-document mode end-to-end (single + batch): per-page transcript, .txt/.md/.docx export | ☐ | ☐ | API-4; `_meta.partial` fallback path also worth exercising with a deliberately malformed response |
+| 43 | Landscape / dense-page crop legibility (dual-scale reconciliation) | ☐ | ☐ | `ENABLE_DUAL_SCALE_CROPS`; benchmark fixture `landscape-a4-widefield` |
+| 44 | Same field on 2+ pages with different values returns joined `[หน้า N: ...]` string, not just page 1 | ☐ | ☐ | OCR-9; identical-value case must NOT get the page-prefix treatment |
 
 ---
 
